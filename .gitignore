@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug / probe outputs
+*_probe.json
+*_debug.html
+*_debug.json
+
+# Downloaded media (temporary)
+*.mp4
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.wav
+*.vtt
+*.srt
+
+# Cookie files
+cookies.txt
+*_cookies.txt
+
+# Logs
+*.log
+
+# Whisper model cache
+*.bin
+models/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+
+# Local application output
+outputs/
+downloads/
+.playwright/
