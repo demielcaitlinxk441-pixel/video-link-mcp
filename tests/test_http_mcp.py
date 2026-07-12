@@ -1,0 +1,23 @@
+from unittest.mock import patch
+import unittest
+
+import server
+
+
+class HttpMcpTests(unittest.TestCase):
+    def test_http_mode_uses_streamable_http_and_localhost_port(self):
+        config = server.parse_runtime_config(['--transport', 'http', '--port', '8765'])
+
+        self.assertEqual(config.transport, 'streamable-http')
+        self.assertEqual(config.port, 8765)
+
+        with patch.object(server.mcp, 'run') as run:
+            server.run_server(config)
+
+        self.assertEqual(server.mcp.settings.host, '127.0.0.1')
+        self.assertEqual(server.mcp.settings.port, 8765)
+        run.assert_called_once_with(transport='streamable-http')
+
+
+if __name__ == '__main__':
+    unittest.main()

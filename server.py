@@ -24,9 +24,11 @@ MCP tools exposed:
     - analyze_video         : Full pipeline (download + subtitle/STT)
 """
 
+import argparse
 import os
 import sys
 import json
+from dataclasses import dataclass
 
 # Ensure the lib directory is importable regardless of CWD
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +42,42 @@ from lib.downloader import download_video as _download_video
 from lib.downloader import get_video_info as _get_video_info
 from lib.transcriber import transcribe_audio as _transcribe_audio
 
-mcp = FastMCP('video-link-analyzer')
+LOCAL_HTTP_HOST = '127.0.0.1'
+DEFAULT_HTTP_PORT = 8000
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    transport: str
+    port: int = DEFAULT_HTTP_PORT
+
+
+def parse_runtime_config(argv: list[str] | None = None) -> RuntimeConfig:
+    """Parse the transport and port used to start the MCP server."""
+    parser = argparse.ArgumentParser(description='Video Link Analyzer MCP Server')
+    parser.add_argument('--transport', choices=('stdio', 'http'), default='stdio')
+    parser.add_argument('--port', type=int, default=DEFAULT_HTTP_PORT)
+    args = parser.parse_args(argv)
+
+    if not 1 <= args.port <= 65535:
+        parser.error('--port must be between 1 and 65535')
+
+    transport = 'streamable-http' if args.transport == 'http' else 'stdio'
+    return RuntimeConfig(transport=transport, port=args.port)
+
+
+mcp = FastMCP(
+    'video-link-analyzer',
+    host=LOCAL_HTTP_HOST,
+    port=DEFAULT_HTTP_PORT,
+)
+
+
+def run_server(config: RuntimeConfig) -> None:
+    """Start the registered MCP tools using the requested transport."""
+    if config.transport == 'streamable-http':
+        mcp.settings = mcp.settings.model_copy(update={'port': config.port})
+    mcp.run(transport=config.transport)
 
 
 def _build_cookie_kwargs(
@@ -318,4 +355,4 @@ def analyze_video(
 # ──────────────────────────────────────────────
 
 if __name__ == '__main__':
-    mcp.run()
+    run_server(parse_runtime_config())
