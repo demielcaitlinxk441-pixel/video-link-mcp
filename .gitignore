@@ -58,3 +58,6 @@ models/
 outputs/
 downloads/
 .playwright/
+
+# Local Git worktrees
+.worktrees/
