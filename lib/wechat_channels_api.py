@@ -298,8 +298,8 @@ def is_custom_worker_configured() -> bool:
 
 
 def is_public_worker_allowed() -> bool:
-    """Return whether the user explicitly opted into the public Worker."""
-    value = os.environ.get("WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER", "")
+    """Return whether public Worker use is enabled (enabled by default)."""
+    value = os.environ.get("WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER", "true")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 

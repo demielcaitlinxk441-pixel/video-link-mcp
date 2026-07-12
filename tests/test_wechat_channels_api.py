@@ -6,11 +6,12 @@ from lib import wechat_channels_api as api
 
 
 class WorkerPrivacyTests(unittest.TestCase):
-    def test_public_worker_is_disabled_by_default(self):
+    def test_public_worker_is_enabled_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
-            with patch.object(api, '_parse_share_url_worker') as worker:
-                self.assertIsNone(api.parse_share_link('https://weixin.qq.com/sph/example'))
-        worker.assert_not_called()
+            with patch.object(api, '_parse_share_url_worker', return_value={'feedInfo': {}}) as worker:
+                result = api.parse_share_link('https://weixin.qq.com/sph/example')
+        self.assertEqual(result, {'feedInfo': {}})
+        worker.assert_called_once()
 
     def test_public_worker_requires_true_flag(self):
         environment = {'WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER': 'true'}

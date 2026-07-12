@@ -4,7 +4,7 @@
       "command": "REPLACE_WITH_VENV_PYTHON_PATH",
       "args": ["REPLACE_WITH_SERVER_PY_PATH"],
       "env": {
-        "WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER": "false"
+        "WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER": "true"
       }
     }
   }

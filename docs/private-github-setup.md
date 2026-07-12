@@ -19,4 +19,4 @@ Clone the private repository, then run `setup.bat` on Windows or `chmod +x setup
 
 ## Credentials and video号 privacy
 
-Each computer manages its own browser login and optional `WECHAT_CHANNELS_YUANBAO_COOKIE`. The default public Worker is disabled. To use it deliberately, set `WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true`; alternatively, set a self-hosted `WECHAT_CHANNELS_WORKER_URL`.
+Each computer manages its own browser login and optional `WECHAT_CHANNELS_YUANBAO_COOKIE`. The default public Worker is enabled. To disable it, set `WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=false`; alternatively, set a self-hosted `WECHAT_CHANNELS_WORKER_URL`.

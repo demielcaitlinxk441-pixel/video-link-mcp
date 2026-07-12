@@ -14,7 +14,7 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_env_example_contains_names_but_no_secret_values(self):
         lines = (ROOT / '.env.example').read_text(encoding='utf-8').splitlines()
         self.assertIn('WECHAT_CHANNELS_YUANBAO_COOKIE=', lines)
-        self.assertIn('WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=false', lines)
+        self.assertIn('WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true', lines)
 
     def test_readme_documents_private_installation_and_worker_opt_in(self):
         readme = (ROOT / 'README.md').read_text(encoding='utf-8')
