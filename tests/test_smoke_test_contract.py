@@ -10,6 +10,11 @@ class SmokeTestContractTests(unittest.TestCase):
         source = (ROOT / 'scripts' / 'verify.py').read_text(encoding='utf-8')
         self.assertIn('sys.exit(1 if failed else 0)', source)
 
+    def test_smoke_test_checks_http_mcp_route(self):
+        source = (ROOT / 'scripts' / 'verify.py').read_text(encoding='utf-8')
+        self.assertIn('test_http_mcp_contract', source)
+        self.assertIn("streamable_http_app()", source)
+
 
 if __name__ == '__main__':
     unittest.main()

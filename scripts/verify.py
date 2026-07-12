@@ -41,6 +41,12 @@ def test_mcp_import():
     assert mcp is not None
 
 
+def test_http_mcp_contract():
+    import server
+    app = server.mcp.streamable_http_app()
+    assert any(route.path == '/mcp' for route in app.routes)
+
+
 def test_ytdlp_import():
     import yt_dlp
     assert yt_dlp is not None
@@ -145,6 +151,7 @@ if __name__ == '__main__':
     print('Module imports:')
     test('Import all lib modules', test_imports)
     test('Import MCP SDK', test_mcp_import)
+    test('Check HTTP MCP route', test_http_mcp_contract)
     test('Import yt-dlp', test_ytdlp_import)
     print()
 

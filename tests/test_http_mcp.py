@@ -15,6 +15,12 @@ class HttpMcpTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             server.parse_runtime_config(['--transport', 'http', '--port', '70000'])
 
+    def test_streamable_http_app_exposes_mcp_route(self):
+        app = server.mcp.streamable_http_app()
+        paths = {route.path for route in app.routes}
+
+        self.assertIn('/mcp', paths)
+
     def test_http_mode_uses_streamable_http_and_localhost_port(self):
         config = server.parse_runtime_config(['--transport', 'http', '--port', '8765'])
 
