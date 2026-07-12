@@ -3,21 +3,21 @@
 Standalone command-line video downloader using the project's downloader module.
 
 Usage:
-    python download_direct.py <URL> [chrome|edge|firefox] [output_dir]
+    python scripts/download_direct.py <URL> [chrome|edge|firefox] [output_dir]
 
 Examples:
-    python download_direct.py https://www.douyin.com/video/123456789 chrome
-    python download_direct.py https://www.youtube.com/watch?v=xxx edge ./videos
-    python download_direct.py https://www.douyin.com/video/123456789 "" ./videos --cookies-file=cookies.txt
+    python scripts/download_direct.py https://www.douyin.com/video/123456789 chrome
+    python scripts/download_direct.py https://www.youtube.com/watch?v=xxx edge ./videos
+    python scripts/download_direct.py https://www.douyin.com/video/123456789 "" ./videos --cookies-file=cookies.txt
 """
 
 import json
 import os
 import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from lib.downloader import download_video
 

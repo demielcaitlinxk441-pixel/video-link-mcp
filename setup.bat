@@ -51,7 +51,7 @@ if errorlevel 1 (
 )
 
 echo Running offline checks...
-"%PYTHON%" "%PROJECT_DIR%\test_server.py"
+"%PYTHON%" "%PROJECT_DIR%\scripts\verify.py"
 if errorlevel 1 exit /b 1
 "%PYTHON%" "%PROJECT_DIR%\diagnose.py"
 if errorlevel 1 exit /b 1

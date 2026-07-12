@@ -21,7 +21,7 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "WARNING: ffmpeg was not found. Video merging and transcription need it."
 fi
 
-"$PYTHON" "$PROJECT_DIR/test_server.py"
+"$PYTHON" "$PROJECT_DIR/scripts/verify.py"
 "$PYTHON" "$PROJECT_DIR/diagnose.py"
 
 cat <<EOF

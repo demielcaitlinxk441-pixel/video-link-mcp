@@ -2,15 +2,15 @@
 """
 Quick test script for Video Link Analyzer MCP Server.
 Verifies that all modules import correctly and basic functions work.
-Run: python test_server.py
+Run: python scripts/verify.py
 """
 
 import os
 import sys
 import json
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
 passed = 0
 failed = 0

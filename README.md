@@ -28,7 +28,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `test_server.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`。
+需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`。
 
 更新时执行 `git pull`，然后再次运行对应的安装脚本和 `diagnose.py`。登录 Cookie 和视频号 Cookie 只能在当前电脑的浏览器或 MCP 环境变量中配置，不能提交到仓库。
 
@@ -109,7 +109,7 @@ venv\Scripts\pip install faster-whisper
 ### 5. 运行测试
 
 ```bat
-venv\Scripts\python.exe test_server.py
+venv\Scripts\python.exe scripts\verify.py
 ```
 
 ---
@@ -130,10 +130,11 @@ video-link-mcp/
 ├── requirements.txt          # 核心依赖
 ├── requirements-stt.txt      # 可选依赖（语音转文字）
 ├── setup.bat                 # Windows 一键安装脚本
-├── test_server.py            # 测试脚本
-├── intercept_download.py     # Playwright 拦截下载独立脚本（命令行可用）
-├── download_direct.py        # 命令行直接下载脚本
-├── download_with_cookies.bat # 使用浏览器 Cookie 下载（抖音等）
+├── scripts/                  # 命令行辅助工具与离线自检
+│   ├── verify.py             # 离线自检脚本
+│   ├── intercept_download.py # Playwright 拦截下载独立脚本
+│   ├── download_direct.py    # 命令行直接下载脚本
+│   └── download_with_cookies.bat # 使用浏览器 Cookie 下载
 ├── mcp_config_example.json   # MCP 配置示例
 ├── .gitignore               # Git 忽略规则（排除 venv/缓存/调试文件）
 └── README.md
@@ -243,19 +244,19 @@ yt-dlp 会自动从你登录过抖音的 Chrome 中读取 Cookie。
 
 ```bat
 cd video-link-mcp
-download_with_cookies.bat https://www.douyin.com/video/123456789 chrome
+scripts\download_with_cookies.bat https://www.douyin.com/video/123456789 chrome
 ```
 
 如果要换浏览器：
 
 ```bat
-download_with_cookies.bat https://www.douyin.com/video/123456789 edge
+scripts\download_with_cookies.bat https://www.douyin.com/video/123456789 edge
 ```
 
 指定输出目录：
 
 ```bat
-download_with_cookies.bat https://www.douyin.com/video/123456789 chrome C:\Downloads
+scripts\download_with_cookies.bat https://www.douyin.com/video/123456789 chrome C:\Downloads
 ```
 
 ### 方式 3：使用导出的 cookies.txt
@@ -321,7 +322,7 @@ A: 有三层兜底机制：
 
 1. **先传 Cookie 参数**：调用时传入 `"cookies_from_browser": "chrome"`（或 edge / firefox），详见上方「抖音 / 需要 Cookie 的平台下载指南」。
 2. **自动 Playwright 兜底**：如果 yt-dlp 仍然失败（如 Chrome DPAPI 加密问题、Edge 数据库锁定），`download_video` 和 `analyze_video` 会**自动切换到 Playwright 拦截模式**——用无头浏览器打开视频页面，拦截真实视频 URL 直接下载，不需要 Cookie。
-3. **手动用脚本**：运行 `venv\Scripts\python.exe intercept_download.py "抖音链接"` 直接走 Playwright 拦截。
+3. **手动用脚本**：运行 `venv\Scripts\python.exe scripts\intercept_download.py "抖音链接"` 直接走 Playwright 拦截。
 
 Playwright 兜底是全自动的，你不需要额外操作。首次使用前确保已安装：
 

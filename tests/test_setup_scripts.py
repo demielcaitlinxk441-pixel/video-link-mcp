@@ -10,7 +10,7 @@ class SetupScriptContractTests(unittest.TestCase):
         script = (ROOT / 'setup.bat').read_text(encoding='utf-8')
         self.assertNotIn('pypi.tuna.tsinghua.edu.cn', script)
         self.assertIn('diagnose.py', script)
-        self.assertIn('test_server.py', script)
+        self.assertIn('scripts\\verify.py', script)
 
     def test_posix_setup_supports_optional_stt(self):
         script = (ROOT / 'setup.sh').read_text(encoding='utf-8')

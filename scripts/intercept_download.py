@@ -19,9 +19,9 @@ import tempfile
 import urllib.request
 from urllib.parse import urlparse
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'video-link-analyzer')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
