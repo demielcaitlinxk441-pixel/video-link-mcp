@@ -5,6 +5,16 @@ import server
 
 
 class HttpMcpTests(unittest.TestCase):
+    def test_default_mode_keeps_stdio_transport(self):
+        config = server.parse_runtime_config([])
+
+        self.assertEqual(config.transport, 'stdio')
+        self.assertEqual(config.port, 8000)
+
+    def test_rejects_port_outside_valid_tcp_range(self):
+        with self.assertRaises(SystemExit):
+            server.parse_runtime_config(['--transport', 'http', '--port', '70000'])
+
     def test_http_mode_uses_streamable_http_and_localhost_port(self):
         config = server.parse_runtime_config(['--transport', 'http', '--port', '8765'])
 
