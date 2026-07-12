@@ -67,4 +67,9 @@ echo     }
 echo   }
 echo }
 echo.
+echo For compatible HTTP MCP clients, start the local service with:
+echo   scripts\start_http_mcp.bat
+echo Then use this URL in that client: http://127.0.0.1:8000/mcp
+echo Use scripts\start_http_mcp.bat --port 8765 if port 8000 is occupied.
+echo.
 echo Optional speech-to-text: setup.bat --with-stt

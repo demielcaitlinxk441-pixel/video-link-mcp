@@ -30,6 +30,16 @@ class RepositoryLayoutTests(unittest.TestCase):
         source = (ROOT / 'scripts' / 'download_with_cookies.bat').read_text(encoding='utf-8')
         self.assertIn('set "PYTHON=%~dp0..\\venv\\Scripts\\python.exe"', source)
 
+    def test_http_start_script_uses_project_virtual_environment(self):
+        source = (ROOT / 'scripts' / 'start_http_mcp.bat').read_text(encoding='utf-8')
+        self.assertIn('venv\\Scripts\\python.exe', source)
+        self.assertIn('server.py" --transport http', source)
+
+    def test_http_example_uses_loopback_url(self):
+        source = (ROOT / 'mcp_http_config_example.json').read_text(encoding='utf-8')
+        self.assertIn('http://127.0.0.1:8000/mcp', source)
+        self.assertNotIn('0.0.0.0', source)
+
 
 if __name__ == '__main__':
     unittest.main()

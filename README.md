@@ -106,6 +106,28 @@ venv\Scripts\pip install faster-whisper
 
 > 将路径替换为实际的项目路径。运行 `setup.bat` 后会自动打印完整配置。
 
+#### 支持 HTTP MCP 的客户端
+
+部分客户端不支持本机 stdio MCP、但支持 Streamable HTTP MCP。先在项目目录运行：
+
+```bat
+scripts\start_http_mcp.bat
+```
+
+然后在客户端中填写 MCP 服务地址：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+该地址只允许**当前电脑**访问：每位使用者都需要在自己的电脑上安装并启动一次服务。端口 `8000` 被占用时，可改用：
+
+```bat
+scripts\start_http_mcp.bat --port 8765
+```
+
+并将客户端地址同步改为 `http://127.0.0.1:8765/mcp`。可参考 [mcp_http_config_example.json](mcp_http_config_example.json)。
+
 ### 5. 运行测试
 
 ```bat
@@ -136,6 +158,7 @@ video-link-mcp/
 │   ├── download_direct.py    # 命令行直接下载脚本
 │   └── download_with_cookies.bat # 使用浏览器 Cookie 下载
 ├── mcp_config_example.json   # MCP 配置示例
+├── mcp_http_config_example.json # HTTP MCP 配置示例
 ├── .gitignore               # Git 忽略规则（排除 venv/缓存/调试文件）
 └── README.md
 ```

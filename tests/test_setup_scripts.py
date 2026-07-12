@@ -12,6 +12,11 @@ class SetupScriptContractTests(unittest.TestCase):
         self.assertIn('diagnose.py', script)
         self.assertIn('scripts\\verify.py', script)
 
+    def test_windows_setup_prints_http_mcp_start_command(self):
+        script = (ROOT / 'setup.bat').read_text(encoding='utf-8')
+        self.assertIn('scripts\\start_http_mcp.bat', script)
+        self.assertIn('http://127.0.0.1:8000/mcp', script)
+
     def test_posix_setup_supports_optional_stt(self):
         script = (ROOT / 'setup.sh').read_text(encoding='utf-8')
         self.assertIn('--with-stt', script)
