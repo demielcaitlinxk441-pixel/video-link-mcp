@@ -32,6 +32,8 @@ chmod +x setup.sh
 
 更新时执行 `git pull`，然后再次运行对应的安装脚本和 `diagnose.py`。登录 Cookie 和视频号 Cookie 只能在当前电脑的浏览器或 MCP 环境变量中配置，不能提交到仓库。
 
+遇到安装、环境或连接问题，请查看[安装与排错指南](docs/installation-and-troubleshooting.md)。
+
 ---
 
 ## 功能概览
