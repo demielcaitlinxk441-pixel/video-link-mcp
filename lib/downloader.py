@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 0.6 seconds
+Output:
 """
 Video download module.
 Uses yt-dlp to download video + audio + subtitles.
@@ -15,6 +18,7 @@ import time
 import subprocess
 import tempfile
 import glob
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import parse_qs, urlparse, urlencode, urlunparse
 
@@ -40,6 +44,21 @@ def _handle_wechat_channels_info(url: str, **kwargs) -> dict:
     from .wechat_channels_api import get_video_info
     yuanbao_cookie = kwargs.get('yuanbao_cookie')
     return get_video_info(url, yuanbao_cookie=yuanbao_cookie)
+
+
+def _run_playwright_intercept(url: str, output_dir: Optional[str]) -> dict:
+    """Run Playwright's synchronous API outside an MCP asyncio loop.
+
+    FastMCP invokes tools while an asyncio loop is active. Playwright's
+    ``sync_playwright`` intentionally rejects that situation, so the fallback
+    must execute in a separate worker thread.
+    """
+    from .playwright_downloader import intercept_download
+
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix='playwright-intercept'
+    ) as executor:
+        return executor.submit(intercept_download, url, output_dir).result()
 
 
 def find_ffmpeg() -> Optional[str]:
@@ -234,8 +253,7 @@ def get_video_info(
 
         # If yt-dlp fails, try Playwright to at least get the page title
         try:
-            from .playwright_downloader import intercept_download as _pw_download
-            pw_result = _pw_download(url, None)
+            pw_result = _run_playwright_intercept(url, None)
             if pw_result.get('success'):
                 return {
                     'success': True,
@@ -249,7 +267,7 @@ def get_video_info(
                     'available_auto_subs': [],
                     'note': 'Video info retrieved via Playwright fallback (yt-dlp failed).',
                 }
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
 
         return {
@@ -452,7 +470,7 @@ def download_video(
         # Playwright intercept method as a last resort.
         # This is especially useful for Douyin / TikTok.
         try:
-            from .playwright_downloader import intercept_download as _pw_download
+            pw_result = _run_playwright_intercept(url, output_dir)
         except ImportError:
             return {
                 'success': False,
@@ -462,8 +480,11 @@ def download_video(
                 'cookies_file': cookies_file,
                 'proxy': proxy,
             }
-
-        pw_result = _pw_download(url, output_dir)
+        except Exception as pw_error:
+            pw_result = {
+                'success': False,
+                'error': f'Playwright fallback failed: {pw_error}',
+            }
         if pw_result.get('success'):
             # Build a result dict compatible with the yt-dlp path
             return {
@@ -498,3 +519,4 @@ def download_video(
             'cookies_file': cookies_file,
             'proxy': proxy,
         }
+
