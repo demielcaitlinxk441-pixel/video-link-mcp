@@ -64,6 +64,8 @@ class MediaCompatibilityTests(unittest.TestCase):
 
                 self.assertEqual(checked['compatibility']['status'], 'converted')
                 self.assertEqual(checked['source_video_path'], str(source))
+                self.assertTrue(checked['compatibility']['source_removed'])
+                self.assertFalse(source.exists())
                 self.assertTrue(checked['video_path'].endswith(' (兼容版).mp4'))
                 self.assertTrue(Path(checked['video_path']).is_file())
 
@@ -80,6 +82,30 @@ class MediaCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(checked['compatibility']['status'], 'conversion_unavailable')
         self.assertEqual(checked['video_path'], str(source))
+
+    def test_verified_conversion_keeps_both_files_when_source_deletion_is_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'video.mp4'
+            source.write_bytes(b'old')
+            result = {'success': True, 'video_path': str(source), 'size': 3}
+
+            def fake_transcode(_, target, __):
+                Path(target).write_bytes(b'converted')
+                return True
+
+            with patch('lib.downloader._find_ffprobe', return_value='ffprobe'), \
+                 patch('lib.downloader._probe_media', side_effect=[AV1_MP4, H264_AAC_MP4]), \
+                 patch('lib.downloader._decode_check', return_value=True), \
+                 patch('lib.downloader._transcode_to_compatible_mp4', side_effect=fake_transcode), \
+                 patch('lib.downloader.os.remove', side_effect=PermissionError):
+                checked = downloader._ensure_compatible_video(
+                    result, 'ffmpeg', lambda _: None
+                )
+
+            self.assertEqual(checked['compatibility']['status'], 'converted')
+            self.assertFalse(checked['compatibility']['source_removed'])
+            self.assertTrue(source.is_file())
+            self.assertTrue(Path(checked['video_path']).is_file())
 
 
 if __name__ == '__main__':

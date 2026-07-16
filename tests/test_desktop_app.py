@@ -43,11 +43,11 @@ class DesktopAppTests(unittest.TestCase):
             'video_path': 'C:/downloads/video (兼容版).mp4',
             'size': 1024 * 1024,
             'metadata': {'title': '测试视频'},
-            'compatibility': {'status': 'converted'},
+            'compatibility': {'status': 'converted', 'source_removed': True},
         })
 
         self.assertEqual(self.window.task_stage.text(), '兼容 MP4 已验证')
-        self.assertIn('原文件已保留', self.window.task_meta.text())
+        self.assertIn('原始文件已删除', self.window.task_meta.text())
 
     def test_delete_button_removes_only_the_selected_history_record(self):
         record = {
@@ -61,33 +61,12 @@ class DesktopAppTests(unittest.TestCase):
             self.assertFalse(self.window.delete_history_button.isEnabled())
             self.window.history.setCurrentRow(0)
             self.assertTrue(self.window.delete_history_button.isEnabled())
-            with patch(
-                'desktop_app.QMessageBox.exec',
-                return_value=desktop_app.QMessageBox.StandardButton.Yes,
-            ), patch('desktop_app._remove_history_entry') as remove:
+            with patch('desktop_app._remove_history_entry') as remove:
                 self.window.delete_selected_history()
 
         remove.assert_called_once_with('download-1')
         self.assertIn('视频文件没有删除', self.window.hint.text())
 
-    def test_delete_confirmation_can_be_skipped_after_user_preference(self):
-        with patch('desktop_app._skip_history_delete_confirmation', return_value=True), \
-             patch('desktop_app.QMessageBox.exec') as dialog_exec:
-            self.assertTrue(self.window._confirm_history_deletion('测试视频'))
-
-        dialog_exec.assert_not_called()
-
-    def test_delete_confirmation_preference_keeps_the_saved_download_folder(self):
-        with tempfile.TemporaryDirectory() as directory:
-            settings_file = Path(directory) / 'settings.json'
-            with patch('desktop_app.APP_DIR', Path(directory)), \
-                 patch('desktop_app.SETTINGS_FILE', settings_file):
-                desktop_app._save_download_dir(Path('C:/downloads'))
-                desktop_app._save_history_delete_confirmation_preference()
-                settings = desktop_app._settings()
-
-        self.assertEqual(settings['download_dir'], str(Path('C:/downloads')))
-        self.assertTrue(settings['skip_history_delete_confirmation'])
 
 
 if __name__ == '__main__':

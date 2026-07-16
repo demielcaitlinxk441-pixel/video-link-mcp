@@ -13,7 +13,7 @@ from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar,
-    QVBoxLayout, QWidget, QFileDialog, QCheckBox,
+    QVBoxLayout, QWidget, QFileDialog,
 )
 
 from lib.downloader import download_video
@@ -65,16 +65,6 @@ def _saved_download_dir() -> Path:
 def _save_download_dir(directory: Path) -> None:
     settings = _settings()
     settings['download_dir'] = str(directory)
-    _save_settings(settings)
-
-
-def _skip_history_delete_confirmation() -> bool:
-    return bool(_settings().get('skip_history_delete_confirmation', False))
-
-
-def _save_history_delete_confirmation_preference() -> None:
-    settings = _settings()
-    settings['skip_history_delete_confirmation'] = True
     _save_settings(settings)
 
 
@@ -207,7 +197,8 @@ class MainWindow(QMainWindow):
         self.task_title.setText(title)
         if compatibility_status == 'converted':
             self.task_stage.setText('兼容 MP4 已验证')
-            self.task_meta.setText(f"已转换为 H.264 MP4 · {_human_size(result.get('size'))} · 原文件已保留")
+            source_note = '原始文件已删除' if compatibility.get('source_removed') else '原始文件仍保留'
+            self.task_meta.setText(f"已转换为 H.264 MP4 · {_human_size(result.get('size'))} · {source_note}")
         elif compatibility_status == 'already_compatible':
             self.task_stage.setText('下载完成，已验证可播放')
             self.task_meta.setText(f"H.264 MP4 · {_human_size(result.get('size'))}")
@@ -242,8 +233,6 @@ class MainWindow(QMainWindow):
             self._update_history_actions()
             return
 
-        if not self._confirm_history_deletion(entry.get('title', '这条下载记录')):
-            return
         try:
             _remove_history_entry(entry['id'])
         except OSError:
@@ -251,31 +240,6 @@ class MainWindow(QMainWindow):
             return
         self._load_history()
         self._show_hint('已从下载列表移除；视频文件没有删除。')
-
-    def _confirm_history_deletion(self, title: str) -> bool:
-        if _skip_history_delete_confirmation():
-            return True
-
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Warning)
-        dialog.setWindowTitle('移除下载记录')
-        dialog.setText(f'要从列表中移除“{title}”吗？')
-        dialog.setInformativeText('视频文件会保留在电脑中。')
-        dialog.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        dialog.setDefaultButton(QMessageBox.StandardButton.No)
-        dont_ask_again = QCheckBox('以后不再提示')
-        dont_ask_again.setToolTip('之后删除下载记录时将直接执行。')
-        dialog.setCheckBox(dont_ask_again)
-        if dialog.exec() != QMessageBox.StandardButton.Yes:
-            return False
-        if dont_ask_again.isChecked():
-            try:
-                _save_history_delete_confirmation_preference()
-            except OSError:
-                self._show_hint('本次会移除记录，但系统无法保存“不再提示”设置。', error=True)
-        return True
 
     def open_file(self, item):
         entry = item.data(Qt.ItemDataRole.UserRole)

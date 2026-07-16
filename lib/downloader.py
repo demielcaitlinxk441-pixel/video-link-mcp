@@ -267,9 +267,16 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
         result['source_video_path'] = source_path
         result['video_path'] = target_path
         result['size'] = os.path.getsize(target_path)
+        try:
+            os.remove(source_path)
+        except OSError:
+            source_removed = False
+        else:
+            source_removed = True
         result['compatibility'] = {
             'status': 'converted',
             'source_video_path': source_path,
+            'source_removed': source_removed,
         }
         report_progress({'stage': '兼容 MP4 已验证'})
         return result
