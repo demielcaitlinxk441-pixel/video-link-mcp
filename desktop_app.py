@@ -37,6 +37,13 @@ def _save_history(item: dict) -> None:
     HISTORY_FILE.write_text(json.dumps([item, *_history()][:20], ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def _remove_history_entry(entry_id: str) -> None:
+    """Remove one local list record without touching the downloaded video."""
+    remaining = [entry for entry in _history() if entry.get('id') != entry_id]
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def _saved_download_dir() -> Path:
     try:
         value = json.loads(SETTINGS_FILE.read_text(encoding='utf-8')).get('download_dir')
@@ -110,8 +117,9 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.setTextVisible(False); task.addWidget(self.progress)
         self.task_meta = QLabel(''); self.task_meta.setObjectName('hint'); task.addWidget(self.task_meta); left.addWidget(self.task_card); left.addStretch()
         self.task_card.hide()
-        right = QVBoxLayout(); history_title = QLabel('最近下载'); history_title.setObjectName('sectionTitle'); right.addWidget(history_title)
-        self.history = QListWidget(); self.history.setObjectName('history'); self.history.itemDoubleClicked.connect(self.open_file); right.addWidget(self.history, 1)
+        right = QVBoxLayout(); history_header = QHBoxLayout(); history_title = QLabel('最近下载'); history_title.setObjectName('sectionTitle'); history_header.addWidget(history_title); history_header.addStretch()
+        self.delete_history_button = QPushButton('删除选中记录'); self.delete_history_button.setObjectName('deleteHistoryButton'); self.delete_history_button.setEnabled(False); self.delete_history_button.setToolTip('只从列表移除记录，不会删除视频文件。'); self.delete_history_button.clicked.connect(self.delete_selected_history); history_header.addWidget(self.delete_history_button); right.addLayout(history_header)
+        self.history = QListWidget(); self.history.setObjectName('history'); self.history.itemDoubleClicked.connect(self.open_file); self.history.currentItemChanged.connect(self._update_history_actions); right.addWidget(self.history, 1)
         columns.addLayout(left, 3); columns.addLayout(right, 2); layout.addLayout(columns, 1)
 
     def _refresh_destination(self):
@@ -202,17 +210,47 @@ class MainWindow(QMainWindow):
         self.history.clear()
         for entry in _history():
             item = QListWidgetItem(f"{entry['title']}\n{_human_size(entry.get('size'))}   ·   双击打开")
-            item.setData(Qt.ItemDataRole.UserRole, entry.get('video_path')); self.history.addItem(item)
+            item.setData(Qt.ItemDataRole.UserRole, entry); self.history.addItem(item)
+        self._update_history_actions()
+
+    def _update_history_actions(self, *_):
+        self.delete_history_button.setEnabled(self.history.currentItem() is not None)
+
+    def delete_selected_history(self):
+        item = self.history.currentItem()
+        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not isinstance(entry, dict) or not entry.get('id'):
+            self._update_history_actions()
+            return
+
+        title = entry.get('title', '这条下载记录')
+        answer = QMessageBox.question(
+            self,
+            '移除下载记录',
+            f'要从列表中移除“{title}”吗？\n\n视频文件会保留在电脑中。',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            _remove_history_entry(entry['id'])
+        except OSError:
+            self._show_hint('无法移除这条下载记录，请稍后再试。', error=True)
+            return
+        self._load_history()
+        self._show_hint('已从下载列表移除；视频文件没有删除。')
 
     def open_file(self, item):
-        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        path = Path(entry.get('video_path', '')) if isinstance(entry, dict) else Path(entry)
         if path.is_file(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         else: QMessageBox.warning(self, '文件不存在', '该文件可能已被移动或删除。')
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet('''#root{background:#0b0d12;color:#f6f8fc;font-family:"Microsoft YaHei";}#brand{font-size:20px;font-weight:700;color:#f6f8fc;}#status{color:#92a7d5;font-size:13px;}#eyebrow{color:#83a3ff;font-size:12px;font-weight:700;letter-spacing:2px;}#title{font-size:44px;font-weight:700;line-height:1.08;color:#f6f8fc;}#inputCard,#taskCard{background:#151a25;border:1px solid #30394b;border-radius:18px;}#linkIcon{font-size:30px;color:#9eb8ff;}QLineEdit{background:transparent;border:0;color:#f6f8fc;font-size:17px;min-height:46px;}QLineEdit:focus{outline:none;}#downloadButton{background:#4d7cff;color:white;border:0;border-radius:12px;padding:0 22px;min-height:48px;font-size:16px;font-weight:700;}#downloadButton:hover{background:#638bff;}#downloadButton:disabled{background:#2f3e70;color:#b5c0e0;}#destinationLabel{color:#98a2b6;font-size:13px;}#destinationPath{color:#c4cfeb;font-size:13px;}#folderButton{background:#1c2331;border:1px solid #34415b;color:#e6ebf7;border-radius:9px;padding:8px 12px;font-size:13px;}#folderButton:hover{border-color:#7194ff;background:#263452;}#hint{color:#98a2b6;font-size:13px;}#error{color:#ff8795;font-size:13px;}#sectionTitle{font-size:17px;font-weight:700;color:#f6f8fc;}#taskTitle{font-size:16px;font-weight:600;color:#f6f8fc;}#taskStage{font-size:14px;color:#9eb8ff;}QProgressBar{height:7px;border:0;border-radius:4px;background:#252d3c;}QProgressBar::chunk{background:#4d7cff;border-radius:4px;}#history{background:#151a25;border:1px solid #30394b;border-radius:16px;padding:6px;color:#f6f8fc;outline:none;}#history::item{padding:14px 12px;border-bottom:1px solid #283142;border-radius:8px;}#history::item:selected{background:#22345e;}''')
+    app.setStyleSheet('''#root{background:#0b0d12;color:#f6f8fc;font-family:"Microsoft YaHei";}#brand{font-size:20px;font-weight:700;color:#f6f8fc;}#status{color:#92a7d5;font-size:13px;}#eyebrow{color:#83a3ff;font-size:12px;font-weight:700;letter-spacing:2px;}#title{font-size:44px;font-weight:700;line-height:1.08;color:#f6f8fc;}#inputCard,#taskCard{background:#151a25;border:1px solid #30394b;border-radius:18px;}#linkIcon{font-size:30px;color:#9eb8ff;}QLineEdit{background:transparent;border:0;color:#f6f8fc;font-size:17px;min-height:46px;}QLineEdit:focus{outline:none;}#downloadButton{background:#4d7cff;color:white;border:0;border-radius:12px;padding:0 22px;min-height:48px;font-size:16px;font-weight:700;}#downloadButton:hover{background:#638bff;}#downloadButton:disabled{background:#2f3e70;color:#b5c0e0;}#destinationLabel{color:#98a2b6;font-size:13px;}#destinationPath{color:#c4cfeb;font-size:13px;}#folderButton{background:#1c2331;border:1px solid #34415b;color:#e6ebf7;border-radius:9px;padding:8px 12px;font-size:13px;}#folderButton:hover{border-color:#7194ff;background:#263452;}#deleteHistoryButton{background:#3b202a;border:1px solid #704052;color:#ffd8df;border-radius:9px;padding:8px 12px;min-height:36px;font-size:13px;}#deleteHistoryButton:hover{background:#562a39;border-color:#bb5b73;}#deleteHistoryButton:disabled{background:#1a1e29;border-color:#2c3445;color:#626c82;}#hint{color:#98a2b6;font-size:13px;}#error{color:#ff8795;font-size:13px;}#sectionTitle{font-size:17px;font-weight:700;color:#f6f8fc;}#taskTitle{font-size:16px;font-weight:600;color:#f6f8fc;}#taskStage{font-size:14px;color:#9eb8ff;}QProgressBar{height:7px;border:0;border-radius:4px;background:#252d3c;}QProgressBar::chunk{background:#4d7cff;border-radius:4px;}#history{background:#151a25;border:1px solid #30394b;border-radius:16px;padding:6px;color:#f6f8fc;outline:none;}#history::item{padding:14px 12px;border-bottom:1px solid #283142;border-radius:8px;}#history::item:selected{background:#22345e;}''')
     window = MainWindow(); window.show(); sys.exit(app.exec())
 
 

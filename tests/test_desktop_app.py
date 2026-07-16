@@ -49,6 +49,27 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(self.window.task_stage.text(), '兼容 MP4 已验证')
         self.assertIn('原文件已保留', self.window.task_meta.text())
 
+    def test_delete_button_removes_only_the_selected_history_record(self):
+        record = {
+            'id': 'download-1',
+            'title': '测试视频',
+            'video_path': 'C:/downloads/video.mp4',
+            'size': 1024,
+        }
+        with patch('desktop_app._history', return_value=[record]):
+            self.window._load_history()
+            self.assertFalse(self.window.delete_history_button.isEnabled())
+            self.window.history.setCurrentRow(0)
+            self.assertTrue(self.window.delete_history_button.isEnabled())
+            with patch(
+                'desktop_app.QMessageBox.question',
+                return_value=desktop_app.QMessageBox.StandardButton.Yes,
+            ), patch('desktop_app._remove_history_entry') as remove:
+                self.window.delete_selected_history()
+
+        remove.assert_called_once_with('download-1')
+        self.assertIn('视频文件没有删除', self.window.hint.text())
+
 
 if __name__ == '__main__':
     unittest.main()
