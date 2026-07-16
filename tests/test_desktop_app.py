@@ -1,8 +1,12 @@
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+if sys.platform != 'win32':
+    raise unittest.SkipTest('Windows desktop UI tests run on Windows CI only.')
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 

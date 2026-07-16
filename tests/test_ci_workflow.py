@@ -10,6 +10,8 @@ class CiWorkflowTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/test.yml').read_text(encoding='utf-8')
         self.assertIn('python -m unittest discover -s tests -v', workflow)
         self.assertIn('actions/setup-python', workflow)
+        self.assertIn('ubuntu-latest', workflow)
+        self.assertIn('windows-latest', workflow)
         self.assertNotIn('WECHAT_CHANNELS_YUANBAO_COOKIE', workflow)
 
 
