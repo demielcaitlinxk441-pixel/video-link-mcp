@@ -20,6 +20,7 @@ if "%BROWSER%"=="" set "BROWSER=chrome"
 if "%OUTDIR%"=="" set "OUTDIR=%TEMP%\video-link-analyzer"
 
 set "PYTHON=%~dp0..\venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=%LOCALAPPDATA%\VideoLinkAnalyzer\runtime\Scripts\python.exe"
 set "SCRIPT=%~dp0download_direct.py"
 
 if not exist "%PYTHON%" (

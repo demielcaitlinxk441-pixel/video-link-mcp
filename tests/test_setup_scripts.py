@@ -13,6 +13,14 @@ class SetupScriptContractTests(unittest.TestCase):
         self.assertIn('scripts\\verify.py', script)
         self.assertIn('create_desktop_shortcut.ps1', script)
         self.assertIn('start_desktop_app.bat', script)
+        self.assertIn('VideoLinkAnalyzer\\runtime', script)
+        self.assertIn('setlocal EnableDelayedExpansion', script)
+        self.assertIn('if !PROJECT_PATH_LENGTH! GTR 80', script)
+
+    def test_windows_launchers_fall_back_to_the_short_runtime_directory(self):
+        for filename in ('start_desktop_app.bat', 'start_http_mcp.bat', 'download_with_cookies.bat'):
+            script = (ROOT / 'scripts' / filename).read_text(encoding='utf-8')
+            self.assertIn('VideoLinkAnalyzer\\runtime', script)
 
     def test_windows_setup_prints_http_mcp_start_command(self):
         script = (ROOT / 'setup.bat').read_text(encoding='utf-8')

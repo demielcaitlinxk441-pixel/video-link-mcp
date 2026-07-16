@@ -17,6 +17,10 @@ class DiagnoseTests(unittest.TestCase):
     def test_core_ready_is_false_when_a_required_package_is_missing(self, _):
         self.assertFalse(diagnose.collect_diagnostics()['core_ready'])
 
+    @patch('diagnose._chromium_is_installed', return_value=False)
+    def test_core_ready_is_false_when_playwright_browser_is_missing(self, _):
+        self.assertFalse(diagnose.collect_diagnostics()['core_ready'])
+
 
 if __name__ == '__main__':
     unittest.main()

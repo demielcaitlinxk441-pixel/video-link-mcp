@@ -3,6 +3,8 @@ setlocal
 set "ROOT=%~dp0.."
 set "PYTHON=%ROOT%\venv\Scripts\pythonw.exe"
 if not exist "%PYTHON%" set "PYTHON=%ROOT%\venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=%LOCALAPPDATA%\VideoLinkAnalyzer\runtime\Scripts\pythonw.exe"
+if not exist "%PYTHON%" set "PYTHON=%LOCALAPPDATA%\VideoLinkAnalyzer\runtime\Scripts\python.exe"
 if not exist "%PYTHON%" (
   echo Virtual environment not found. Run setup.bat first.
   pause

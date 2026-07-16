@@ -30,6 +30,8 @@ chmod +x setup.sh
 
 需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`。
 
+如果项目被放在很深的文件夹中，Windows 可能无法解压桌面窗口依赖。安装脚本会自动识别这种情况，并把运行环境放在当前用户的短路径本机目录中；不需要手动移动项目，桌面快捷方式和启动脚本仍可正常使用。
+
 更新时执行 `git pull`，然后再次运行对应的安装脚本和 `diagnose.py`。登录 Cookie 和视频号 Cookie 只能在当前电脑的浏览器或 MCP 环境变量中配置，不能提交到仓库。
 
 遇到安装、环境或连接问题，请查看[安装与排错指南](docs/installation-and-troubleshooting.md)。

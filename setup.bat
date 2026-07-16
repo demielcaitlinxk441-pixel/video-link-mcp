@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>nul
-setlocal
+setlocal EnableDelayedExpansion
 
 set "PROJECT_DIR=%~dp0"
 set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
@@ -16,13 +16,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "%PROJECT_DIR%\venv\Scripts\python.exe" (
+set "VENV_DIR=%PROJECT_DIR%\venv"
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+    for /f %%L in ('powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('PROJECT_DIR').Length"') do set "PROJECT_PATH_LENGTH=%%L"
+    if !PROJECT_PATH_LENGTH! GTR 80 (
+        set "VENV_DIR=%LOCALAPPDATA%\VideoLinkAnalyzer\runtime"
+        echo Project path is long. Using a short local runtime directory instead.
+    )
+)
+
+if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo Creating virtual environment...
-    python -m venv "%PROJECT_DIR%\venv"
+    python -m venv "%VENV_DIR%"
     if errorlevel 1 exit /b 1
 )
 
-set "PYTHON=%PROJECT_DIR%\venv\Scripts\python.exe"
+set "PYTHON=%VENV_DIR%\Scripts\python.exe"
 echo Installing core dependencies...
 "%PYTHON%" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
@@ -57,9 +66,13 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 
 echo Creating desktop shortcut...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\create_desktop_shortcut.ps1" -ProjectRoot "%PROJECT_DIR%"
-if errorlevel 1 (
-    echo WARNING: The desktop shortcut could not be created. You can run scripts\start_desktop_app.bat directly.
+if /I "%VIDEO_LINK_SKIP_SHORTCUT%"=="1" (
+    echo Skipping desktop shortcut creation for this automated setup check.
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\create_desktop_shortcut.ps1" -ProjectRoot "%PROJECT_DIR%"
+    if errorlevel 1 (
+        echo WARNING: The desktop shortcut could not be created. You can run scripts\start_desktop_app.bat directly.
+    )
 )
 
 echo.

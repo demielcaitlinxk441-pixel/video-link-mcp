@@ -118,31 +118,47 @@ class MainWindow(QMainWindow):
         self.destination_path.setText(str(self.output_dir))
         self.destination_path.setToolTip(str(self.output_dir))
 
+    def _show_hint(self, message: str, *, error: bool = False) -> None:
+        self.hint.setText(message)
+        self.hint.setObjectName('error' if error else 'hint')
+        self.hint.show()
+        self.hint.style().unpolish(self.hint)
+        self.hint.style().polish(self.hint)
+
     def choose_folder(self):
         selected = QFileDialog.getExistingDirectory(self, '选择视频保存文件夹', str(self.output_dir))
         if selected:
             self.output_dir = Path(selected)
-            _save_download_dir(self.output_dir)
             self._refresh_destination()
-            self.hint.setText('已保存新的下载位置，之后的下载都会使用这里。')
-            self.hint.show()
+            try:
+                _save_download_dir(self.output_dir)
+            except OSError:
+                self._show_hint('已选择新位置，但系统无法记住它；本次下载仍会使用该位置。', error=True)
+            else:
+                self._show_hint('已保存新的下载位置，之后的下载都会使用这里。')
 
     def start_download(self):
         url = self.url.text().strip()
         if not url.startswith(('http://', 'https://')):
-            self.hint.setText('请输入完整的视频链接。'); self.hint.setObjectName('error'); self.hint.show(); self.hint.style().unpolish(self.hint); self.hint.style().polish(self.hint); return
+            self._show_hint('请输入完整的视频链接。', error=True); return
         if self.active_job:
-            self.hint.setText('已有下载任务正在进行，请稍候。'); self.hint.show(); return
+            self._show_hint('已有下载任务正在进行，请稍候。'); return
         self.active_job = {'id': uuid.uuid4().hex, 'url': url, 'stage': '正在解析链接'}
         self.button.setEnabled(False); self.url.setEnabled(False); self.folder_button.setEnabled(False); self.progress.setRange(0, 0)
+        self.hint.hide()
         self.task_card.show()
         self.task_title.setText('正在识别视频信息…'); self.task_stage.setText('正在解析链接'); self.task_meta.setText('请保持程序打开。')
         threading.Thread(target=self._download_worker, daemon=True).start()
 
     def _download_worker(self):
         def report(data): self.events.progress.emit(data)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        result = download_video(self.active_job['url'], str(self.output_dir), progress_callback=report)
+        job = self.active_job or {}
+        output_dir = self.output_dir
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            result = download_video(job['url'], str(output_dir), progress_callback=report)
+        except Exception as exc:
+            result = {'success': False, 'error': f'无法保存或下载视频：{exc}'}
         self.events.finished.emit(result)
 
     def _update_progress(self, data):
@@ -160,8 +176,11 @@ class MainWindow(QMainWindow):
             self.task_stage.setText('下载失败'); self.task_meta.setText(result.get('error', '无法下载该链接')); self.progress.setRange(0, 100); self.progress.setValue(0); return
         metadata = result.get('metadata', {}); title = metadata.get('title') or Path(result['video_path']).stem
         self.task_title.setText(title); self.task_stage.setText('下载完成'); self.task_meta.setText(f"已保存 · {_human_size(result.get('size'))}"); self.progress.setRange(0, 100); self.progress.setValue(100)
-        _save_history({'id': uuid.uuid4().hex, 'title': title, 'video_path': result['video_path'], 'size': result.get('size', 0), 'created_at': int(time.time())})
-        self._load_history()
+        try:
+            _save_history({'id': uuid.uuid4().hex, 'title': title, 'video_path': result['video_path'], 'size': result.get('size', 0), 'created_at': int(time.time())})
+            self._load_history()
+        except OSError:
+            self._show_hint('视频已下载，但系统无法保存下载记录。', error=True)
 
     def _load_history(self):
         self.history.clear()

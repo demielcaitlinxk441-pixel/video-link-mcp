@@ -9,7 +9,7 @@ import shutil
 import sys
 
 
-REQUIRED_PACKAGES = ('mcp', 'yt_dlp', 'playwright')
+REQUIRED_PACKAGES = ('mcp', 'yt_dlp', 'playwright', 'PySide6')
 
 
 def _chromium_is_installed() -> bool:
@@ -34,14 +34,15 @@ def collect_diagnostics() -> dict:
     }
     supported_python = (3, 10) <= sys.version_info[:2] <= (3, 13)
 
+    playwright_browser = _chromium_is_installed()
     return {
         'python': sys.version.split()[0],
         'supported_python': supported_python,
         'core_dependencies': dependencies,
         'ffmpeg': shutil.which('ffmpeg') is not None,
-        'playwright_browser': _chromium_is_installed(),
+        'playwright_browser': playwright_browser,
         'speech_to_text': importlib.util.find_spec('faster_whisper') is not None,
-        'core_ready': supported_python and all(dependencies.values()),
+        'core_ready': supported_python and all(dependencies.values()) and playwright_browser,
     }
 
 
