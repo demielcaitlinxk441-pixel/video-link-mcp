@@ -14,9 +14,10 @@ anti-scraping (Douyin, TikTok) without needing cookies or browser lock access.
 import os
 import re
 import tempfile
+import time
 import urllib.request
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Callable, Optional
 
 # Output directory defaults to system temp
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'video-link-analyzer')
@@ -24,7 +25,7 @@ OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'video-link-analyzer')
 UA = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
-    'Chrome/130.0.0.0 Safari/537.36'
+    'Chrome/150.0.0.0 Safari/537.36'
 )
 
 # Domains that serve actual video content
@@ -41,6 +42,12 @@ VIDEO_CONTENT_DOMAINS = [
     # Xiaohongshu video CDN
     'xhscdn.com',
     'sns-video',
+    # Kuaishou video CDN
+    'kwaicdn.com',
+    'kwimgs.com',
+    'ksapisrv.com',
+    'yximgs.com',
+    'gifshow.com',
 ]
 
 # Domains that serve static/effect assets (skip these)
@@ -88,7 +95,13 @@ def _sanitize_filename(title: str, max_len: int = 80) -> str:
     return safe if safe else 'video'
 
 
-def _download_file(video_url: str, title: str, output_dir: str, referer: str = 'https://www.douyin.com/') -> dict:
+def _download_file(
+    video_url: str,
+    title: str,
+    output_dir: str,
+    referer: str = 'https://www.douyin.com/',
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict:
     """Download a video file directly from its URL."""
     os.makedirs(output_dir, exist_ok=True)
     safe_title = _sanitize_filename(title)
@@ -107,6 +120,7 @@ def _download_file(video_url: str, title: str, output_dir: str, referer: str = '
             if resp.status in (206,) and total:
                 total += 1
             downloaded = 0
+            last_progress = -1
             with open(output_path, 'wb') as f:
                 while True:
                     chunk = resp.read(65536)
@@ -114,6 +128,16 @@ def _download_file(video_url: str, title: str, output_dir: str, referer: str = '
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if progress_callback and total:
+                        progress = min(99, int(downloaded * 100 / total))
+                        if progress != last_progress:
+                            last_progress = progress
+                            progress_callback({
+                                'stage': '正在下载视频',
+                                'progress': progress,
+                                'downloaded_bytes': downloaded,
+                                'total_bytes': total,
+                            })
         size = os.path.getsize(output_path)
         return {'success': True, 'video_path': output_path, 'size': size}
     except Exception as e:
@@ -123,6 +147,8 @@ def _download_file(video_url: str, title: str, output_dir: str, referer: str = '
 def intercept_download(
     url: str,
     output_dir: Optional[str] = None,
+    allow_interactive_verification: bool = False,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """
     Use Playwright to intercept video network requests and download directly.
@@ -159,6 +185,7 @@ def intercept_download(
     # Detect platform and configure accordingly
     is_xhs = 'xiaohongshu' in url.lower() or 'xhslink' in url.lower()
     is_douyin = 'douyin' in url.lower() or 'iesdouyin' in url.lower()
+    is_kuaishou = 'kuaishou.com' in url.lower() or 'gifshow.com' in url.lower()
 
     if is_xhs:
         # Xiaohongshu mobile web is more accessible (no login wall)
@@ -169,6 +196,12 @@ def intercept_download(
         )
         viewport = {'width': 390, 'height': 844}
         referer = 'https://www.xiaohongshu.com/'
+    elif is_kuaishou:
+        # 快手会对无头浏览器直接返回滑块验证码。使用可见窗口，让用户自行
+        # 完成一次平台验证；不会尝试绕过验证。
+        user_agent = UA
+        viewport = {'width': 1280, 'height': 800}
+        referer = 'https://www.kuaishou.com/'
     else:
         user_agent = UA
         viewport = {'width': 1920, 'height': 1080}
@@ -181,7 +214,21 @@ def intercept_download(
     page_html = ''
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        interactive_kuaishou = is_kuaishou and allow_interactive_verification
+        launch_options = {'headless': not interactive_kuaishou}
+        if interactive_kuaishou:
+            # 快手会拦截 Playwright 附带的 Chromium（版本通常落后于本机
+            # Chrome）。实测新版 Chrome 可以完成快手的此类页面访问，
+            # 因此优先使用 Chrome；Edge 只作为后备。
+            try:
+                browser = p.chromium.launch(channel='chrome', **launch_options)
+            except Exception:
+                try:
+                    browser = p.chromium.launch(channel='msedge', **launch_options)
+                except Exception:
+                    browser = p.chromium.launch(**launch_options)
+        else:
+            browser = p.chromium.launch(**launch_options)
         context = browser.new_context(
             user_agent=user_agent,
             viewport=viewport,
@@ -197,6 +244,8 @@ def intercept_download(
             catch_patterns = ['.mp4', '.m3u8', 'video', 'aweme/v1/play', '/play/']
             if is_xhs:
                 catch_patterns.extend(['sns-video', 'xhscdn', '/api/sns/web/v1/feed'])
+            if is_kuaishou:
+                catch_patterns.extend(['kwaicdn', 'kwimgs', 'ksapisrv', 'yximgs', 'gifshow', '/photo/play'])
 
             if any(ext in lower for ext in catch_patterns):
                 content_type = response.headers.get('content-type', '')
@@ -235,8 +284,26 @@ def intercept_download(
         except Exception:
             pass
 
-        # Wait for page to load and video to start
-        page.wait_for_timeout(8000)
+        # Wait for page to load and video to start. Kuaishou may show a
+        # “browser version too low” overlay. Keep its visible window open so
+        # the user can manually select the official “retry” action; do not
+        # attempt to dismiss or bypass the platform prompt programmatically.
+        if is_kuaishou and allow_interactive_verification:
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                try:
+                    retry_visible = page.get_by_text('点击重试', exact=True).is_visible()
+                except Exception:
+                    retry_visible = False
+                if (
+                    'captcha' not in page.url.lower()
+                    and page.query_selector('video')
+                    and not retry_visible
+                ):
+                    break
+                page.wait_for_timeout(1000)
+        else:
+            page.wait_for_timeout(8000)
 
         # Try to click play button (different selectors for different platforms)
         try:
@@ -250,8 +317,20 @@ def intercept_download(
         except Exception:
             pass
 
-        # Get page metadata
-        page_title = page.title()
+        # Get page metadata. Kuaishou may close its challenge page while the
+        # user is verifying, so surface a useful failure instead of leaking a
+        # Playwright TargetClosedError to the desktop app.
+        try:
+            page_title = page.title()
+        except Exception:
+            if is_kuaishou:
+                return {
+                    'success': False,
+                    'error': '快手窗口已关闭，未能完成操作。请重新下载，在弹出窗口点击“点击重试”，并保持窗口打开。',
+                    'metadata': {'title': '', 'description': '', 'source_url': url},
+                    'method': 'playwright_intercept',
+                }
+            raise
 
         # Try to get description (platform-specific selectors)
         try:
@@ -309,6 +388,13 @@ def intercept_download(
             real_urls = big_statics
 
     if not real_urls:
+        if is_kuaishou:
+            return {
+                'success': False,
+                'error': '快手没有返回视频地址。请重新下载，在弹出窗口点击“点击重试”，等待页面加载后保持窗口打开。',
+                'metadata': {'title': page_title, 'description': page_description, 'source_url': url},
+                'method': 'playwright_intercept',
+            }
         return {
             'success': False,
             'error': 'No video URL intercepted. The page may require JavaScript interaction or login.',
@@ -319,7 +405,10 @@ def intercept_download(
     # Try each real video URL until one works
     for entry in real_urls:
         vurl = entry['url']
-        result = _download_file(vurl, page_title or 'video', output_dir, referer=referer)
+        result = _download_file(
+            vurl, page_title or 'video', output_dir, referer=referer,
+            progress_callback=progress_callback,
+        )
         if result.get('success'):
             # Verify the downloaded file is not too small (likely a placeholder)
             min_size = 200_000  # 200KB threshold
@@ -367,8 +456,6 @@ def _extract_xhs_video_urls(data, url_list: list):
 
 def _extract_xhs_video_from_html(html: str, url_list: list):
     """Extract video URLs from Xiaohongshu page HTML (script tags, JSON data)."""
-    import re
-
     # Look for video URLs in script content
     # XHS embeds initial state in window.__INITIAL_STATE__ or similar
     patterns = [

@@ -159,7 +159,7 @@ video-link-mcp/
 ├── server.py                 # MCP 服务器入口（定义 5 个工具）
 ├── desktop_app.py            # Windows 桌面下载器入口
 ├── assets/
-│   └── app-icon.ico          # 桌面快捷方式和窗口图标
+│   └── video-download-round.ico # 桌面快捷方式和窗口图标
 ├── lib/
 │   ├── __init__.py
 │   ├── detector.py           # 链接类型检测（URL匹配 + 页面分析）
@@ -173,7 +173,7 @@ video-link-mcp/
 ├── setup.bat                 # Windows 一键安装脚本
 ├── scripts/                  # 命令行辅助工具与离线自检
 │   ├── verify.py             # 离线自检脚本
-│   ├── intercept_download.py # Playwright 拦截下载独立脚本
+│   ├── intercept_download.py # Playwright 拦截下载命令行入口（复用核心实现）
 │   ├── download_direct.py    # 命令行直接下载脚本
 │   ├── download_with_cookies.bat # 使用浏览器 Cookie 下载
 │   ├── start_desktop_app.bat # 启动 Windows 桌面下载器

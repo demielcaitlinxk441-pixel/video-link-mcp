@@ -42,7 +42,7 @@ class RepositoryLayoutTests(unittest.TestCase):
 
     def test_desktop_shortcut_uses_the_desktop_launcher_and_app_icon(self):
         source = (ROOT / 'scripts' / 'create_desktop_shortcut.ps1').read_text(encoding='utf-8')
-        self.assertIn('assets\\app-icon.ico', source)
+        self.assertIn('assets\\video-download-round.ico', source)
         self.assertIn('start_desktop_app.bat', source)
 
     def test_http_example_uses_loopback_url(self):

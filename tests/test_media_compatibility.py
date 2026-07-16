@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,6 +24,15 @@ AV1_MP4 = {
 
 
 class MediaCompatibilityTests(unittest.TestCase):
+    def test_ffmpeg_helpers_request_a_hidden_windows_process(self):
+        options = downloader._hidden_process_kwargs()
+        if sys.platform != 'win32':
+            self.assertEqual(options, {})
+            return
+
+        self.assertEqual(options.get('creationflags'), downloader.subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(options['startupinfo'].wShowWindow, downloader.subprocess.SW_HIDE)
+
     def test_h264_aac_yuv420p_mp4_is_high_compatibility(self):
         self.assertTrue(downloader._is_high_compatibility_mp4(H264_AAC_MP4))
         self.assertFalse(downloader._is_high_compatibility_mp4(AV1_MP4))

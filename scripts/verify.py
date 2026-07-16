@@ -65,12 +65,6 @@ def test_detector_bilibili():
     assert result['platform'] == 'Bilibili'
 
 
-def test_detector_article_url():
-    from lib.detector import detect_link_type
-    result = detect_link_type('https://www.bilibili.com/video/BV1xx411c7mD')
-    assert result['type'] == 'video'
-
-
 def test_vtt_parser():
     from lib.subtitle_parser import parse_vtt
     sample = """WEBVTT

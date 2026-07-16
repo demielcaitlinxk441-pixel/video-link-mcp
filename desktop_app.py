@@ -1,7 +1,8 @@
-"""Native Windows desktop application for Video Link Analyzer."""
+"""Native Windows desktop video downloader."""
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -11,9 +12,9 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar,
-    QVBoxLayout, QWidget, QFileDialog,
+    QApplication, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar, QMenu,
+    QVBoxLayout, QWidget, QFileDialog, QScrollArea, QPlainTextEdit, QSizePolicy,
 )
 
 from lib.downloader import download_video
@@ -77,8 +78,8 @@ def _human_size(value: int | None) -> str:
 
 
 class DownloadEvents(QObject):
-    progress = Signal(dict)
-    finished = Signal(dict)
+    progress = Signal(str, dict)
+    finished = Signal(str, dict)
 
 
 class MainWindow(QMainWindow):
@@ -87,15 +88,21 @@ class MainWindow(QMainWindow):
         self.events = DownloadEvents()
         self.events.progress.connect(self._update_progress)
         self.events.finished.connect(self._finished)
-        self.active_job: dict | None = None
+        self.jobs: dict[str, dict] = {}
+        self.job_order: list[str] = []
+        self.pending_job_ids: list[str] = []
+        self.active_job_ids: set[str] = set()
+        self.paused = False
+        self.max_parallel_downloads = 2
         self.output_dir = _saved_download_dir()
-        self.setWindowTitle('Video Link Analyzer')
+        self.setWindowTitle('视频下载')
         self.setMinimumSize(980, 680)
         self.resize(1180, 760)
-        icon = ROOT / 'assets' / 'app-icon.ico'
+        icon = ROOT / 'assets' / 'video-download-round.ico'
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
         self._build()
+        self._render_jobs()
         self._load_history()
 
     def _build(self):
@@ -103,8 +110,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root); layout.setContentsMargins(48, 42, 48, 36); layout.setSpacing(26)
         card = QFrame(); card.setObjectName('inputCard'); card_layout = QHBoxLayout(card); card_layout.setContentsMargins(20, 18, 16, 18); card_layout.setSpacing(14)
         link = QLabel('⌁'); link.setObjectName('linkIcon'); card_layout.addWidget(link)
-        self.url = QLineEdit(); self.url.setPlaceholderText('粘贴 B 站、抖音或视频号链接'); self.url.setClearButtonEnabled(True); self.url.returnPressed.connect(self.start_download); card_layout.addWidget(self.url, 1)
-        self.button = QPushButton('开始下载  ↗'); self.button.clicked.connect(self.start_download); self.button.setObjectName('downloadButton'); card_layout.addWidget(self.button)
+        self.url = QPlainTextEdit(); self.url.setObjectName('urlInput'); self.url.setPlaceholderText('粘贴视频链接；多个链接请每行一个'); self.url.setFixedHeight(76); card_layout.addWidget(self.url, 1)
+        self.button = QPushButton('加入下载队列'); self.button.clicked.connect(self.start_download); self.button.setObjectName('downloadButton'); card_layout.addWidget(self.button)
         layout.addWidget(card)
         destination = QHBoxLayout(); destination.setSpacing(10)
         label = QLabel('保存位置'); label.setObjectName('destinationLabel'); destination.addWidget(label)
@@ -113,18 +120,26 @@ class MainWindow(QMainWindow):
         layout.addLayout(destination)
         self._refresh_destination()
         self.hint = QLabel(); self.hint.setObjectName('hint'); self.hint.hide(); layout.addWidget(self.hint)
-        columns = QHBoxLayout(); columns.setSpacing(32)
-        left = QVBoxLayout(); header = QLabel('当前任务'); header.setObjectName('sectionTitle'); left.addWidget(header)
-        self.task_card = QFrame(); self.task_card.setObjectName('taskCard'); task = QVBoxLayout(self.task_card); task.setContentsMargins(22, 18, 22, 18); task.setSpacing(10)
-        self.task_title = QLabel('粘贴一个链接，下载状态会显示在这里。'); self.task_title.setObjectName('taskTitle'); self.task_title.setWordWrap(True); task.addWidget(self.task_title)
-        self.task_stage = QLabel('等待下载'); self.task_stage.setObjectName('taskStage'); task.addWidget(self.task_stage)
-        self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.setTextVisible(False); task.addWidget(self.progress)
-        self.task_meta = QLabel(''); self.task_meta.setObjectName('hint'); task.addWidget(self.task_meta); left.addWidget(self.task_card); left.addStretch()
+        columns = QHBoxLayout(); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(32)
+        left = QVBoxLayout(); task_header = QHBoxLayout(); header = QLabel('下载队列'); header.setObjectName('sectionTitle'); self.queue_title = header; task_header.addWidget(header)
+        self.queue_summary = QLabel(''); self.queue_summary.setObjectName('queueSummary'); task_header.addWidget(self.queue_summary, 1)
+        self.pause_button = QPushButton('暂停队列'); self.pause_button.setObjectName('queueButton'); self.pause_button.setToolTip('正在下载的视频会继续完成；暂停后不会启动等待中的任务。'); self.pause_button.setFixedWidth(104); self.pause_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed); self.pause_button.clicked.connect(self.toggle_pause); task_header.addWidget(self.pause_button)
+        left.addLayout(task_header)
+        self.task_card = QFrame(); self.task_card.setObjectName('taskCard'); self.task_card.setMinimumHeight(190); task = QVBoxLayout(self.task_card); task.setContentsMargins(12, 12, 12, 12); task.setSpacing(8)
+        self.task_scroll = QScrollArea(); self.task_scroll.setObjectName('taskScroll'); self.task_scroll.setWidgetResizable(True); self.task_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.task_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.task_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.task_scroll.viewport().setObjectName('taskViewport')
+        self.task_list_widget = QWidget(); self.task_list_widget.setObjectName('taskList'); self.task_list_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.task_list = QVBoxLayout(self.task_list_widget); self.task_list.setContentsMargins(0, 0, 0, 0); self.task_list.setSpacing(10); self.task_list.addStretch()
+        self.task_scroll.setWidget(self.task_list_widget); task.addWidget(self.task_scroll); left.addWidget(self.task_card)
         self.task_card.hide()
-        right = QVBoxLayout(); history_header = QHBoxLayout(); history_title = QLabel('最近下载'); history_title.setObjectName('sectionTitle'); history_header.addWidget(history_title); history_header.addStretch()
-        self.delete_history_button = QPushButton('删除选中记录'); self.delete_history_button.setObjectName('deleteHistoryButton'); self.delete_history_button.setEnabled(False); self.delete_history_button.setToolTip('只从列表移除记录，不会删除视频文件。'); self.delete_history_button.clicked.connect(self.delete_selected_history); history_header.addWidget(self.delete_history_button); right.addLayout(history_header)
-        self.history = QListWidget(); self.history.setObjectName('history'); self.history.itemDoubleClicked.connect(self.open_file); self.history.currentItemChanged.connect(self._update_history_actions); right.addWidget(self.history, 1)
-        columns.addLayout(left, 3); columns.addLayout(right, 2); layout.addLayout(columns, 1)
+        right = QVBoxLayout(); history_title = QLabel('最近下载'); history_title.setObjectName('sectionTitle'); right.addWidget(history_title)
+        self.history = QListWidget(); self.history.setMinimumHeight(190); self.history.setObjectName('history'); self.history.itemDoubleClicked.connect(self.open_file); self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.history.customContextMenuRequested.connect(self.show_history_menu); right.addWidget(self.history)
+        columns.addLayout(left, 3); columns.addLayout(right, 2)
+        columns.setAlignment(left, Qt.AlignmentFlag.AlignTop)
+        columns.setAlignment(right, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(columns); layout.addStretch(1)
 
     def _refresh_destination(self):
         self.destination_path.setText(str(self.output_dir))
@@ -149,92 +164,239 @@ class MainWindow(QMainWindow):
             else:
                 self._show_hint('已保存新的下载位置，之后的下载都会使用这里。')
 
-    def start_download(self):
-        url = self.url.text().strip()
-        if not url.startswith(('http://', 'https://')):
-            self._show_hint('请输入完整的视频链接。', error=True); return
-        if self.active_job:
-            self._show_hint('已有下载任务正在进行，请稍候。'); return
-        self.active_job = {'id': uuid.uuid4().hex, 'url': url, 'stage': '正在解析链接'}
-        self.button.setEnabled(False); self.url.setEnabled(False); self.folder_button.setEnabled(False); self.progress.setRange(0, 0)
-        self.hint.hide()
-        self.task_card.show()
-        self.task_title.setText('正在识别视频信息…'); self.task_stage.setText('正在解析链接'); self.task_meta.setText('请保持程序打开。')
-        threading.Thread(target=self._download_worker, daemon=True).start()
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        """Accept one URL per line, while also tolerating copied share text."""
+        urls: list[str] = []
+        for url in re.findall(r'https?://[^\s，。；、！？，（）【】《》]+', text):
+            url = url.rstrip('，。；,.;!！?？）)]}》')
+            if url not in urls:
+                urls.append(url)
+        return urls
 
-    def _download_worker(self):
-        def report(data): self.events.progress.emit(data)
-        job = self.active_job or {}
-        output_dir = self.output_dir
+    @staticmethod
+    def _is_kuaishou_url(url: str) -> bool:
+        host_match = re.match(r'https?://([^/]+)', url, flags=re.IGNORECASE)
+        host = host_match.group(1).lower() if host_match else ''
+        return host == 'kuaishou.com' or host.endswith('.kuaishou.com') or host.endswith('.gifshow.com')
+
+    def _show_kuaishou_notice(self) -> bool:
+        """Explain the required user action before the Kuaishou browser opens."""
+        notice = QMessageBox(self)
+        notice.setIcon(QMessageBox.Icon.Information)
+        notice.setWindowTitle('快手下载提示')
+        notice.setText('快手需要你手动点击一次“点击重试”')
+        notice.setInformativeText(
+            '点击“我知道了，继续”后会打开快手窗口。\n\n'
+            '如果看到“浏览器版本过低”，请在快手窗口点击“点击重试”，然后保持该窗口打开；下载器会继续自动下载视频。'
+        )
+        notice.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        notice.button(QMessageBox.StandardButton.Ok).setText('我知道了，继续')
+        notice.button(QMessageBox.StandardButton.Cancel).setText('暂不下载')
+        notice.setDefaultButton(QMessageBox.StandardButton.Ok)
+        return notice.exec() == QMessageBox.StandardButton.Ok
+
+    def start_download(self):
+        urls = self._extract_urls(self.url.toPlainText())
+        if not urls:
+            self._show_hint('请粘贴完整的视频链接；多个链接请每行一个。', error=True)
+            return
+        if any(self._is_kuaishou_url(url) for url in urls) and not self._show_kuaishou_notice():
+            self._show_hint('已取消快手下载，链接仍保留在输入框中。')
+            return
+        existing_urls = {job['url'] for job in self.jobs.values()}
+        added = 0
+        for url in urls:
+            if url in existing_urls:
+                continue
+            job_id = uuid.uuid4().hex
+            self.jobs[job_id] = {'id': job_id, 'url': url, 'title': url, 'stage': '等待下载', 'status': 'waiting', 'progress': 0, 'output_dir': str(self.output_dir)}
+            self.job_order.append(job_id); self.pending_job_ids.append(job_id); existing_urls.add(url); added += 1
+        self.url.clear(); self.task_card.show(); self.hint.hide()
+        self._start_pending_jobs()
+        if added:
+            self._show_hint(f'已加入 {added} 个链接，默认同时下载 {self.max_parallel_downloads} 个。')
+        else:
+            self._show_hint('这些链接已经在下载队列中。')
+
+    def _start_pending_jobs(self):
+        while not self.paused and self.pending_job_ids and len(self.active_job_ids) < self.max_parallel_downloads:
+            job_id = self.pending_job_ids.pop(0); job = self.jobs.get(job_id)
+            if not job or job.get('status') != 'waiting':
+                continue
+            job.update({'status': 'active', 'stage': '正在解析链接', 'progress': None})
+            self.active_job_ids.add(job_id)
+            threading.Thread(target=self._download_worker, args=(job_id,), daemon=True).start()
+        self._render_jobs()
+
+    def _download_worker(self, job_id: str):
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        def report(data): self.events.progress.emit(job_id, data)
         try:
-            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = Path(job['output_dir']); output_dir.mkdir(parents=True, exist_ok=True)
             result = download_video(job['url'], str(output_dir), progress_callback=report)
         except Exception as exc:
             result = {'success': False, 'error': f'无法保存或下载视频：{exc}'}
-        self.events.finished.emit(result)
+        self.events.finished.emit(job_id, result)
 
-    def _update_progress(self, data):
-        self.task_stage.setText(data.get('stage', '正在下载'))
-        progress = data.get('progress')
-        if progress is not None:
-            self.progress.setRange(0, 100); self.progress.setValue(int(progress))
-        details = [_human_size(data.get('downloaded_bytes')), _human_size(data.get('total_bytes'))]
-        if data.get('speed'): details.append(f"{data['speed'] / 1024 / 1024:.1f} MB/s")
-        self.task_meta.setText(' · '.join(item for item in details if item))
+    def _update_progress(self, job_id: str, data: dict):
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        job['stage'] = data.get('stage', '正在下载')
+        if 'progress' in data:
+            job['progress'] = int(data['progress']) if data['progress'] is not None else None
+        self._render_jobs()
 
-    def _finished(self, result):
-        self.button.setEnabled(True); self.url.setEnabled(True); self.folder_button.setEnabled(True); self.active_job = None
+    def _finished(self, job_id: str, result: dict):
+        job = self.jobs.get(job_id); self.active_job_ids.discard(job_id)
+        if not job:
+            self._start_pending_jobs(); return
         if not result.get('success'):
-            self.task_stage.setText('下载失败'); self.task_meta.setText(result.get('error', '无法下载该链接')); self.progress.setRange(0, 100); self.progress.setValue(0); return
+            job.update({'status': 'failed', 'stage': '下载失败', 'progress': 0})
+            self._show_hint(result.get('error', '无法下载该链接'), error=True)
+            self._render_jobs(); self._start_pending_jobs(); return
         metadata = result.get('metadata', {}); title = metadata.get('title') or Path(result['video_path']).stem
-        compatibility = result.get('compatibility') or {}
-        compatibility_status = compatibility.get('status')
-        self.task_title.setText(title)
-        if compatibility_status == 'converted':
-            self.task_stage.setText('兼容 MP4 已验证')
-            source_note = '原始文件已删除' if compatibility.get('source_removed') else '原始文件仍保留'
-            self.task_meta.setText(f"已转换为 H.264 MP4 · {_human_size(result.get('size'))} · {source_note}")
-        elif compatibility_status == 'already_compatible':
-            self.task_stage.setText('下载完成，已验证可播放')
-            self.task_meta.setText(f"H.264 MP4 · {_human_size(result.get('size'))}")
-        elif compatibility_status:
-            self.task_stage.setText('视频已下载，兼容性未确认')
-            self.task_meta.setText(compatibility.get('message', '请尝试用播放器打开视频。'))
+        compatibility = result.get('compatibility') or {}; compatibility_status = compatibility.get('status')
+        if compatibility_status and compatibility_status not in {'converted', 'already_compatible'}:
             self._show_hint('视频已保存，但兼容性检查没有完成；请确认已安装 ffmpeg。', error=True)
         else:
-            self.task_stage.setText('下载完成')
-            self.task_meta.setText(f"已保存 · {_human_size(result.get('size'))}")
-        self.progress.setRange(0, 100); self.progress.setValue(100)
+            job.update({'stage': '下载完成', 'meta': f"已保存 · {_human_size(result.get('size'))}"})
         try:
             _save_history({'id': uuid.uuid4().hex, 'title': title, 'video_path': result['video_path'], 'size': result.get('size', 0), 'created_at': int(time.time())})
             self._load_history()
         except OSError:
             self._show_hint('视频已下载，但系统无法保存下载记录。', error=True)
+        # 成功下载后的文件已出现在“最近下载”中，不再占用下载队列。
+        self.job_order = [item for item in self.job_order if item != job_id]
+        self.pending_job_ids = [item for item in self.pending_job_ids if item != job_id]
+        self.jobs.pop(job_id, None)
+        if not self.jobs:
+            self.task_card.hide()
+        self._render_jobs(); self._start_pending_jobs()
+
+    def _render_jobs(self):
+        while self.task_list.count():
+            item = self.task_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        active = len(self.active_job_ids)
+        waiting = sum(job.get('status') == 'waiting' for job in self.jobs.values())
+        failed = sum(job.get('status') == 'failed' for job in self.jobs.values())
+        if self.paused and not waiting:
+            # 没有等待中的任务时，暂停状态已不再有意义；避免留下无法恢复的状态。
+            self.paused = False
+            self.hint.clear()
+            self.hint.hide()
+        summary = [f'{active} 个下载中', f'{waiting} 个等待']
+        if failed:
+            summary.append(f'{failed} 个失败')
+        if self.jobs:
+            self.queue_summary.setText(' · '.join(summary))
+            self.queue_summary.show()
+        else:
+            self.queue_summary.clear()
+            self.queue_summary.hide()
+        self.pause_button.setText('继续队列' if self.paused else '暂停队列')
+        self.pause_button.setEnabled(bool(waiting))
+        for job_id in self.job_order:
+            job = self.jobs.get(job_id)
+            if job:
+                self.task_list.addWidget(self._job_row(job))
+        self.task_list.addStretch()
+
+    def _job_row(self, job: dict) -> QFrame:
+        row = QFrame(); row.setObjectName('jobRow')
+        content = QVBoxLayout(row); content.setContentsMargins(16, 14, 16, 14); content.setSpacing(10)
+        title = QLabel(job.get('title', job['url'])); title.setObjectName('jobTitle'); title.setWordWrap(True)
+        title.setToolTip(job.get('title', job['url']))
+        content.addWidget(title)
+        progress = QProgressBar(); progress.setRange(0, 100)
+        progress.setValue(int(job.get('progress') or 0))
+        is_downloading = job.get('stage') in {'正在下载', '正在下载视频'}
+        progress.setTextVisible(is_downloading and job.get('progress') is not None)
+        if progress.isTextVisible():
+            progress.setFormat('下载中 %p%')
+        content.addWidget(progress)
+        return row
+
+    def toggle_pause(self):
+        if not any(job.get('status') == 'waiting' for job in self.jobs.values()):
+            self.paused = False
+            self._render_jobs()
+            return
+        self.paused = not self.paused
+        if self.paused:
+            self._render_jobs()
+            self._show_hint('已暂停队列；正在下载的视频会继续完成。')
+        else:
+            self.hint.clear()
+            self.hint.hide()
+            self._start_pending_jobs()
 
     def _load_history(self):
         self.history.clear()
         for entry in _history():
             item = QListWidgetItem(f"{entry['title']}\n{_human_size(entry.get('size'))}   ·   双击打开")
             item.setData(Qt.ItemDataRole.UserRole, entry); self.history.addItem(item)
-        self._update_history_actions()
 
-    def _update_history_actions(self, *_):
-        self.delete_history_button.setEnabled(self.history.currentItem() is not None)
-
-    def delete_selected_history(self):
+    def _current_history_entry(self) -> dict | None:
         item = self.history.currentItem()
         entry = item.data(Qt.ItemDataRole.UserRole) if item else None
-        if not isinstance(entry, dict) or not entry.get('id'):
-            self._update_history_actions()
-            return
+        return entry if isinstance(entry, dict) and entry.get('id') else None
 
+    def show_history_menu(self, point):
+        item = self.history.itemAt(point)
+        if not item:
+            return
+        self.history.setCurrentItem(item)
+        menu = QMenu(self)
+        open_folder = menu.addAction('打开视频所在文件夹')
+        menu.addSeparator()
+        delete_file = menu.addAction('删除记录和视频文件')
+        selected = menu.exec(self.history.viewport().mapToGlobal(point))
+        if selected == open_folder:
+            self.open_history_folder()
+        elif selected == delete_file:
+            self.delete_history_with_file()
+
+    def open_history_folder(self):
+        entry = self._current_history_entry()
+        if not entry:
+            return
+        directory = Path(entry.get('video_path', '')).parent
+        if directory.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+        else:
+            QMessageBox.warning(self, '文件夹不存在', '视频所在文件夹可能已被移动或删除。')
+
+    def delete_history_with_file(self):
+        entry = self._current_history_entry()
+        if not entry:
+            return
+        path = Path(entry.get('video_path', ''))
+        if path.exists() and not path.is_file():
+            self._show_hint('无法删除：记录对应的不是视频文件。', error=True)
+            return
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            self._show_hint('无法删除视频文件，下载记录已保留。', error=True)
+            return
         try:
             _remove_history_entry(entry['id'])
         except OSError:
-            self._show_hint('无法移除这条下载记录，请稍后再试。', error=True)
+            self._show_hint('视频文件已删除，但无法清理下载记录。', error=True)
             return
         self._load_history()
-        self._show_hint('已从下载列表移除；视频文件没有删除。')
+        # 删除成功后不占用下载队列上方的提示区域。
+        self.hint.clear()
+        self.hint.hide()
 
     def open_file(self, item):
         entry = item.data(Qt.ItemDataRole.UserRole)
@@ -245,7 +407,41 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet('''#root{background:#0b0d12;color:#f6f8fc;font-family:"Microsoft YaHei";}#inputCard,#taskCard{background:#151a25;border:1px solid #30394b;border-radius:18px;}#linkIcon{font-size:30px;color:#9eb8ff;}QLineEdit{background:transparent;border:0;color:#f6f8fc;font-size:17px;min-height:46px;}QLineEdit:focus{outline:none;}#downloadButton{background:#4d7cff;color:white;border:0;border-radius:12px;padding:0 22px;min-height:48px;font-size:16px;font-weight:700;}#downloadButton:hover{background:#638bff;}#downloadButton:disabled{background:#2f3e70;color:#b5c0e0;}#destinationLabel{color:#98a2b6;font-size:13px;}#destinationPath{color:#c4cfeb;font-size:13px;}#folderButton{background:#1c2331;border:1px solid #34415b;color:#e6ebf7;border-radius:9px;padding:8px 12px;font-size:13px;}#folderButton:hover{border-color:#7194ff;background:#263452;}#deleteHistoryButton{background:#3b202a;border:1px solid #704052;color:#ffd8df;border-radius:9px;padding:8px 12px;min-height:36px;font-size:13px;}#deleteHistoryButton:hover{background:#562a39;border-color:#bb5b73;}#deleteHistoryButton:disabled{background:#1a1e29;border-color:#2c3445;color:#626c82;}#hint{color:#98a2b6;font-size:13px;}#error{color:#ff8795;font-size:13px;}#sectionTitle{font-size:17px;font-weight:700;color:#f6f8fc;}#taskTitle{font-size:16px;font-weight:600;color:#f6f8fc;}#taskStage{font-size:14px;color:#9eb8ff;}QProgressBar{height:7px;border:0;border-radius:4px;background:#252d3c;}QProgressBar::chunk{background:#4d7cff;border-radius:4px;}#history{background:#151a25;border:1px solid #30394b;border-radius:16px;padding:6px;color:#f6f8fc;outline:none;}#history::item{padding:14px 12px;border-bottom:1px solid #283142;border-radius:8px;}#history::item:selected{background:#22345e;}''')
+    app.setStyleSheet('''#root{background:#0b0d12;color:#f6f8fc;font-family:"Microsoft YaHei";}#inputCard,#taskCard{background:#151a25;border:1px solid #30394b;border-radius:18px;}#linkIcon{font-size:30px;color:#9eb8ff;}#urlInput{background:transparent;border:0;color:#f6f8fc;font-size:16px;padding:8px 0;}#urlInput:focus{outline:none;}#downloadButton{background:#4d7cff;color:white;border:0;border-radius:12px;padding:0 22px;min-height:48px;font-size:16px;font-weight:700;}#downloadButton:hover{background:#638bff;}#destinationLabel{color:#98a2b6;font-size:13px;}#destinationPath{color:#c4cfeb;font-size:13px;}#folderButton,#queueButton,#jobButton{background:#1c2331;border:1px solid #34415b;color:#e6ebf7;border-radius:9px;padding:8px 12px;min-height:34px;font-size:13px;}#folderButton:hover,#queueButton:hover,#jobButton:hover{border-color:#7194ff;background:#263452;}#queueButton:disabled{color:#626c82;background:#1a1e29;border-color:#2c3445;}#removeJobButton{background:#3b202a;border:1px solid #704052;color:#ffd8df;border-radius:9px;padding:8px 12px;min-height:34px;font-size:13px;}#removeJobButton:hover{background:#562a39;border-color:#bb5b73;}#hint,#jobMeta{color:#98a2b6;font-size:13px;}#error{color:#ff8795;font-size:13px;}#sectionTitle{font-size:17px;font-weight:700;color:#f6f8fc;}#queueSummary{font-size:13px;color:#9eb8ff;}#taskScroll,#taskViewport,#taskList{background:#151a25;border:0;}#jobRow{background:#111722;border:1px solid #283244;border-radius:12px;}#jobTitle{font-size:15px;font-weight:600;color:#f6f8fc;}#jobStage{font-size:13px;color:#9eb8ff;}QProgressBar{height:7px;border:0;border-radius:4px;background:#252d3c;}QProgressBar::chunk{background:#4d7cff;border-radius:4px;}#history{background:#151a25;border:1px solid #30394b;border-radius:16px;padding:6px;color:#f6f8fc;outline:none;}#history::item{padding:14px 12px;border-bottom:1px solid #283142;border-radius:8px;}#history::item:selected{background:#22345e;}QMenu{background:#1c2331;color:#f6f8fc;border:1px solid #3b4863;border-radius:8px;padding:6px;}QMenu::item{padding:9px 28px 9px 12px;border-radius:5px;}QMenu::item:selected{background:#2c467d;}QMenu::separator{height:1px;background:#34415b;margin:5px 8px;}''')
+    app.setStyleSheet(app.styleSheet() + '''
+        #root { background: #f4f7fb; color: #243147; }
+        #inputCard, #taskCard { background: #ffffff; border-color: #d7e0ee; }
+        #linkIcon { color: #6685e8; }
+        #urlInput { color: #243147; selection-background-color: #cfdcff; }
+        #urlInput::placeholder { color: #8492a8; }
+        #downloadButton { background: #6685e8; color: #ffffff; }
+        #downloadButton:hover { background: #5273d8; }
+        #destinationLabel { color: #62718a; }
+        #destinationPath { color: #31415c; }
+        #folderButton, #queueButton, #jobButton {
+            background: #f1f5fb; border-color: #ced9ea; color: #31415c;
+        }
+        #folderButton:hover, #queueButton:hover, #jobButton:hover {
+            background: #e6edff; border-color: #9fb5f3;
+        }
+        #queueButton:disabled { background: #f4f6fa; border-color: #e1e7f0; color: #98a4b5; }
+        #removeJobButton { background: #fff1f3; border-color: #efbcc6; color: #a6364b; }
+        #removeJobButton:hover { background: #ffe2e7; border-color: #df8c9d; }
+        #hint, #jobMeta { color: #68778e; }
+        #error { color: #b33b52; }
+        #sectionTitle, #jobTitle { color: #243147; }
+        #queueSummary, #jobStage { color: #5873c8; }
+        #taskScroll, #taskViewport, #taskList { background: #ffffff; }
+        #jobRow { background: #f8faff; border-color: #dbe4f2; }
+        QProgressBar { background: #e4ebf5; }
+        QProgressBar::chunk { background: #7692ed; }
+        #history { background: #ffffff; border-color: #d7e0ee; color: #243147; }
+        #history::item { border-bottom-color: #e5ebf3; }
+        #history::item:selected { background: #e4ebff; color: #243147; }
+        QMenu { background: #ffffff; color: #243147; border-color: #d0dbea; }
+        QMenu::item:selected { background: #e6edff; }
+        QMenu::separator { background: #e1e7f0; }
+    ''')
     window = MainWindow(); window.show(); sys.exit(app.exec())
 
 
