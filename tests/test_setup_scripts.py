@@ -16,6 +16,7 @@ class SetupScriptContractTests(unittest.TestCase):
         self.assertIn('VideoLinkAnalyzer\\runtime', script)
         self.assertIn('setlocal EnableDelayedExpansion', script)
         self.assertIn('if !PROJECT_PATH_LENGTH! GTR 80', script)
+        self.assertIn('"command": "%PYTHON%"', script)
 
     def test_windows_launchers_fall_back_to_the_short_runtime_directory(self):
         for filename in ('start_desktop_app.bat', 'start_http_mcp.bat', 'download_with_cookies.bat'):

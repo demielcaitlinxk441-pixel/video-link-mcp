@@ -80,7 +80,7 @@ echo Add this entry to your MCP client configuration:
 echo {
 echo   "mcpServers": {
 echo     "video-link-analyzer": {
-echo       "command": "%PROJECT_DIR%\venv\Scripts\python.exe",
+echo       "command": "%PYTHON%",
 echo       "args": ["%PROJECT_DIR%\server.py"]
 echo     }
 echo   }
