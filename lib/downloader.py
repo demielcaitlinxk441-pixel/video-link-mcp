@@ -11,6 +11,7 @@ WeChat Channels (视频号) supports two modes:
 import os
 import re
 import sys
+import json
 import subprocess
 import tempfile
 import glob
@@ -96,6 +97,188 @@ def find_ffmpeg() -> Optional[str]:
                 return match
 
     return None
+
+
+def _find_ffprobe(ffmpeg_path: Optional[str]) -> Optional[str]:
+    """Locate ffprobe next to ffmpeg (or on PATH) for media inspection."""
+    if not ffmpeg_path:
+        return None
+
+    candidates = ['ffprobe']
+    if ffmpeg_path != 'ffmpeg':
+        directory = os.path.dirname(ffmpeg_path)
+        candidates.insert(0, os.path.join(
+            directory, 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+        ))
+
+    for candidate in candidates:
+        try:
+            result = subprocess.run(
+                [candidate, '-version'], capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                return candidate
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def _probe_media(path: str, ffprobe_path: str) -> Optional[dict]:
+    """Return the container and stream codecs for a local media file."""
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path, '-v', 'error', '-show_entries',
+                'format=format_name:stream=codec_type,codec_name,pix_fmt',
+                '-of', 'json', path,
+            ],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout.decode('utf-8', errors='replace'))
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _is_high_compatibility_mp4(media: Optional[dict]) -> bool:
+    """Return whether a file uses the broadly supported H.264/AAC MP4 profile."""
+    if not media:
+        return False
+    format_name = (media.get('format') or {}).get('format_name', '')
+    if 'mp4' not in format_name.split(','):
+        return False
+
+    streams = media.get('streams') or []
+    video_streams = [item for item in streams if item.get('codec_type') == 'video']
+    audio_streams = [item for item in streams if item.get('codec_type') == 'audio']
+    if not video_streams:
+        return False
+    if any(
+        stream.get('codec_name') != 'h264'
+        or stream.get('pix_fmt') != 'yuv420p'
+        for stream in video_streams
+    ):
+        return False
+    return all(stream.get('codec_name') == 'aac' for stream in audio_streams)
+
+
+def _compatible_output_path(source_path: str) -> str:
+    """Create a non-destructive filename for a converted compatibility copy."""
+    root, _ = os.path.splitext(source_path)
+    candidate = f'{root} (兼容版).mp4'
+    number = 2
+    while os.path.exists(candidate):
+        candidate = f'{root} (兼容版 {number}).mp4'
+        number += 1
+    return candidate
+
+
+def _decode_check(path: str, ffmpeg_path: str) -> bool:
+    """Decode video and audio streams fully so a successful result is playable."""
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_path, '-v', 'error', '-i', path,
+                '-map', '0:v:0', '-map', '0:a?', '-f', 'null', '-',
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _transcode_to_compatible_mp4(source_path: str, target_path: str,
+                                 ffmpeg_path: str) -> bool:
+    """Create an H.264/AAC/yuv420p MP4 copy without touching the source."""
+    temporary_path = f'{target_path}.part.mp4'
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_path, '-y', '-i', source_path,
+                '-map', '0:v:0', '-map', '0:a?',
+                '-c:v', 'libx264', '-preset', 'medium', '-crf', '20',
+                '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                '-movflags', '+faststart', temporary_path,
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if result.returncode != 0 or not os.path.exists(temporary_path):
+            return False
+        os.replace(temporary_path, target_path)
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
+def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
+                             report_progress: Callable[[dict], None]) -> dict:
+    """Convert only non-compatible files, then verify the preferred output decodes."""
+    if not result.get('success') or not result.get('video_path'):
+        return result
+
+    source_path = result['video_path']
+    ffprobe_path = _find_ffprobe(ffmpeg_path)
+    if not ffprobe_path:
+        result['compatibility'] = {
+            'status': 'not_checked',
+            'message': '未找到 ffprobe，无法检查视频兼容性。',
+        }
+        return result
+
+    report_progress({'stage': '正在检查播放兼容性'})
+    source_media = _probe_media(source_path, ffprobe_path)
+    if _is_high_compatibility_mp4(source_media):
+        if ffmpeg_path and _decode_check(source_path, ffmpeg_path):
+            result['compatibility'] = {'status': 'already_compatible'}
+        else:
+            result['compatibility'] = {
+                'status': 'verification_failed',
+                'message': '视频格式兼容，但完整播放验证未通过。',
+            }
+        return result
+
+    if not ffmpeg_path:
+        result['compatibility'] = {
+            'status': 'conversion_unavailable',
+            'message': '视频不是高兼容 MP4，且未安装 ffmpeg，无法自动转换。',
+        }
+        return result
+
+    target_path = _compatible_output_path(source_path)
+    report_progress({'stage': '正在转换为通用 MP4'})
+    if not _transcode_to_compatible_mp4(source_path, target_path, ffmpeg_path):
+        result['compatibility'] = {
+            'status': 'conversion_failed',
+            'message': '兼容 MP4 转换失败，已保留原始视频。',
+        }
+        return result
+
+    report_progress({'stage': '正在验证兼容版视频'})
+    target_media = _probe_media(target_path, ffprobe_path)
+    if _is_high_compatibility_mp4(target_media) and _decode_check(target_path, ffmpeg_path):
+        result['source_video_path'] = source_path
+        result['video_path'] = target_path
+        result['size'] = os.path.getsize(target_path)
+        result['compatibility'] = {
+            'status': 'converted',
+            'source_video_path': source_path,
+        }
+        report_progress({'stage': '兼容 MP4 已验证'})
+        return result
+
+    result['compatibility'] = {
+        'status': 'verification_failed',
+        'message': '兼容版未通过播放验证，已保留原始视频。',
+    }
+    return result
 
 
 def _normalize_douyin_url(url: str) -> str:
@@ -365,12 +548,15 @@ def download_video(
             except Exception:
                 pass
 
+    ffmpeg_path = find_ffmpeg()
+
     # WeChat Channels: use direct API or Worker API
     if _is_wechat_channels(url):
         report_progress({'stage': '正在解析微信视频号链接'})
         result = _handle_wechat_channels_download(
             url, output_dir, yuanbao_cookie=yuanbao_cookie
         )
+        result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
         return result
 
@@ -384,7 +570,6 @@ def download_video(
 
     url = normalize_url(url)
 
-    ffmpeg_path = find_ffmpeg()
     lang_list = [lang.strip() for lang in prefer_subtitle_lang.split(',') if lang.strip()]
 
     output_template = os.path.join(
@@ -473,7 +658,7 @@ def download_video(
             if video_path and os.path.exists(video_path):
                 file_size = os.path.getsize(video_path)
 
-            return {
+            return _ensure_compatible_video({
                 'success': True,
                 'video_path': video_path,
                 'size': file_size,
@@ -488,7 +673,7 @@ def download_video(
                 'cookies_from_browser': cookies_from_browser,
                 'cookies_file': cookies_file,
                 'proxy': proxy,
-            }
+            }, ffmpeg_path, report_progress)
 
     except Exception as e:
         error_msg = str(e)
@@ -515,11 +700,11 @@ def download_video(
                 'error': f'Playwright fallback failed: {pw_error}',
             }
         if pw_result.get('success'):
-            report_progress({'stage': '完成', 'progress': 100})
             # Build a result dict compatible with the yt-dlp path
-            return {
+            return _ensure_compatible_video({
                 'success': True,
                 'video_path': pw_result.get('video_path'),
+                'size': pw_result.get('size', 0),
                 'subtitle_path': None,
                 'subtitle_text': None,
                 'subtitle_lang': None,
@@ -538,7 +723,7 @@ def download_video(
                 'cookies_from_browser': cookies_from_browser,
                 'cookies_file': cookies_file,
                 'proxy': proxy,
-            }
+            }, ffmpeg_path, report_progress)
 
         # Both yt-dlp and Playwright failed
         return {

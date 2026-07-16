@@ -37,6 +37,18 @@ class DesktopAppTests(unittest.TestCase):
     def test_packaged_app_icon_exists(self):
         self.assertTrue((desktop_app.ROOT / 'assets' / 'app-icon.ico').is_file())
 
+    def test_finished_download_explains_when_a_compatible_copy_was_created(self):
+        self.window._finished({
+            'success': True,
+            'video_path': 'C:/downloads/video (兼容版).mp4',
+            'size': 1024 * 1024,
+            'metadata': {'title': '测试视频'},
+            'compatibility': {'status': 'converted'},
+        })
+
+        self.assertEqual(self.window.task_stage.text(), '兼容 MP4 已验证')
+        self.assertIn('原文件已保留', self.window.task_meta.text())
+
 
 if __name__ == '__main__':
     unittest.main()

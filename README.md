@@ -28,7 +28,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`。
+需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`；桌面下载器的自动兼容 MP4 转换也需要它。
 
 如果项目被放在很深的文件夹中，Windows 可能无法解压桌面窗口依赖。安装脚本会自动识别这种情况，并把运行环境放在当前用户的短路径本机目录中；不需要手动移动项目，桌面快捷方式和启动脚本仍可正常使用。
 
@@ -46,7 +46,7 @@ chmod +x setup.sh
 2. 安装完成后，桌面会自动出现 **Video Link Analyzer** 快捷方式；
 3. 双击快捷方式，粘贴链接并选择保存位置，即可下载。
 
-这是独立桌面窗口，不是网页。默认下载位置为“视频 / Video Link Analyzer”，也可在窗口中自行选择其他文件夹；选择会保存在当前电脑。下载记录同样只保存在本机。
+这是独立桌面窗口，不是网页。默认下载位置为“视频 / Video Link Analyzer”，也可在窗口中自行选择其他文件夹；选择会保存在当前电脑。下载记录同样只保存在本机。下载结束后会检查视频是否为 H.264 + AAC + yuv420p 的高兼容 MP4；不是时会自动生成并验证“兼容版”MP4，原始文件会保留。
 
 ---
 
@@ -83,7 +83,7 @@ setup.bat
 - 检查 ffmpeg 是否可用
 - 输出 MCP 配置 JSON
 
-### 2. 安装 ffmpeg（视频合并需要）
+### 2. 安装 ffmpeg（视频合并和自动兼容 MP4 转换需要）
 
 ```bat
 winget install ffmpeg
@@ -242,7 +242,7 @@ video-link-mcp/
 |------|------|----------|
 | `mcp` | MCP 协议 SDK | 必须 |
 | `yt-dlp` | 视频下载 | 必须 |
-| ffmpeg | 视频合并 + 音频提取 | 必须 |
+| ffmpeg | 视频合并、音频提取、自动兼容 MP4 转换 | 必须 |
 | `playwright` | Playwright 拦截下载兜底（抖音/TikTok/小红书） | 推荐 |
 | `faster-whisper` | 语音转文字 | 可选（无字幕时需要） |
 | `openai-whisper` | 语音转文字（备选） | 可选 |

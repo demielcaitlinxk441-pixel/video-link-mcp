@@ -175,7 +175,23 @@ class MainWindow(QMainWindow):
         if not result.get('success'):
             self.task_stage.setText('下载失败'); self.task_meta.setText(result.get('error', '无法下载该链接')); self.progress.setRange(0, 100); self.progress.setValue(0); return
         metadata = result.get('metadata', {}); title = metadata.get('title') or Path(result['video_path']).stem
-        self.task_title.setText(title); self.task_stage.setText('下载完成'); self.task_meta.setText(f"已保存 · {_human_size(result.get('size'))}"); self.progress.setRange(0, 100); self.progress.setValue(100)
+        compatibility = result.get('compatibility') or {}
+        compatibility_status = compatibility.get('status')
+        self.task_title.setText(title)
+        if compatibility_status == 'converted':
+            self.task_stage.setText('兼容 MP4 已验证')
+            self.task_meta.setText(f"已转换为 H.264 MP4 · {_human_size(result.get('size'))} · 原文件已保留")
+        elif compatibility_status == 'already_compatible':
+            self.task_stage.setText('下载完成，已验证可播放')
+            self.task_meta.setText(f"H.264 MP4 · {_human_size(result.get('size'))}")
+        elif compatibility_status:
+            self.task_stage.setText('视频已下载，兼容性未确认')
+            self.task_meta.setText(compatibility.get('message', '请尝试用播放器打开视频。'))
+            self._show_hint('视频已保存，但兼容性检查没有完成；请确认已安装 ffmpeg。', error=True)
+        else:
+            self.task_stage.setText('下载完成')
+            self.task_meta.setText(f"已保存 · {_human_size(result.get('size'))}")
+        self.progress.setRange(0, 100); self.progress.setValue(100)
         try:
             _save_history({'id': uuid.uuid4().hex, 'title': title, 'video_path': result['video_path'], 'size': result.get('size', 0), 'created_at': int(time.time())})
             self._load_history()
