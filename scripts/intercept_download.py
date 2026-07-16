@@ -14,7 +14,6 @@ Also captures the page title and description for metadata.
 import os
 import sys
 import json
-import time
 import tempfile
 import urllib.request
 from urllib.parse import urlparse

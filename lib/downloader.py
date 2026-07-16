@@ -11,12 +11,12 @@ WeChat Channels (视频号) supports two modes:
 import os
 import re
 import sys
-import time
 import subprocess
 import tempfile
 import glob
-from typing import Optional
-from urllib.parse import parse_qs, urlparse, urlencode, urlunparse
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
+from urllib.parse import parse_qs, urlparse
 
 
 def _is_wechat_channels(url: str) -> bool:
@@ -40,6 +40,21 @@ def _handle_wechat_channels_info(url: str, **kwargs) -> dict:
     from .wechat_channels_api import get_video_info
     yuanbao_cookie = kwargs.get('yuanbao_cookie')
     return get_video_info(url, yuanbao_cookie=yuanbao_cookie)
+
+
+def _run_playwright_intercept(url: str, output_dir: Optional[str]) -> dict:
+    """Run Playwright's synchronous API outside an MCP asyncio loop.
+
+    FastMCP invokes tools while an asyncio loop is active. Playwright's
+    ``sync_playwright`` intentionally rejects that situation, so the fallback
+    must execute in a separate worker thread.
+    """
+    from .playwright_downloader import intercept_download
+
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix='playwright-intercept'
+    ) as executor:
+        return executor.submit(intercept_download, url, output_dir).result()
 
 
 def find_ffmpeg() -> Optional[str]:
@@ -234,8 +249,7 @@ def get_video_info(
 
         # If yt-dlp fails, try Playwright to at least get the page title
         try:
-            from .playwright_downloader import intercept_download as _pw_download
-            pw_result = _pw_download(url, None)
+            pw_result = _run_playwright_intercept(url, None)
             if pw_result.get('success'):
                 return {
                     'success': True,
@@ -249,7 +263,7 @@ def get_video_info(
                     'available_auto_subs': [],
                     'note': 'Video info retrieved via Playwright fallback (yt-dlp failed).',
                 }
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
 
         return {
@@ -320,6 +334,7 @@ def download_video(
     cookies_file: Optional[str] = None,
     proxy: Optional[str] = None,
     yuanbao_cookie: Optional[str] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """
     Download a video with audio and subtitles.
@@ -343,9 +358,21 @@ def download_video(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    def report_progress(payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(payload)
+            except Exception:
+                pass
+
     # WeChat Channels: use direct API or Worker API
     if _is_wechat_channels(url):
-        return _handle_wechat_channels_download(url, output_dir, yuanbao_cookie=yuanbao_cookie)
+        report_progress({'stage': '正在解析微信视频号链接'})
+        result = _handle_wechat_channels_download(
+            url, output_dir, yuanbao_cookie=yuanbao_cookie
+        )
+        report_progress({'stage': '完成' if result.get('success') else '下载失败'})
+        return result
 
     try:
         import yt_dlp
@@ -377,6 +404,25 @@ def download_video(
         'noprogress': True,
         'overwrites': False,
     }
+
+    if progress_callback:
+        def progress_hook(data: dict) -> None:
+            status = data.get('status')
+            if status == 'downloading':
+                total = data.get('total_bytes') or data.get('total_bytes_estimate')
+                downloaded = data.get('downloaded_bytes', 0)
+                report_progress({
+                    'stage': '正在下载',
+                    'progress': round(downloaded / total * 100, 1) if total else None,
+                    'downloaded_bytes': downloaded,
+                    'total_bytes': total,
+                    'speed': data.get('speed'),
+                    'eta': data.get('eta'),
+                })
+            elif status == 'finished':
+                report_progress({'stage': '正在合并音视频', 'progress': 100})
+
+        base_opts['progress_hooks'] = [progress_hook]
 
     ydl_opts = _build_ydl_opts(
         base_opts, ffmpeg_path, cookies_from_browser, cookies_file, proxy
@@ -452,7 +498,8 @@ def download_video(
         # Playwright intercept method as a last resort.
         # This is especially useful for Douyin / TikTok.
         try:
-            from .playwright_downloader import intercept_download as _pw_download
+            report_progress({'stage': '正在使用浏览器解析视频'})
+            pw_result = _run_playwright_intercept(url, output_dir)
         except ImportError:
             return {
                 'success': False,
@@ -462,9 +509,13 @@ def download_video(
                 'cookies_file': cookies_file,
                 'proxy': proxy,
             }
-
-        pw_result = _pw_download(url, output_dir)
+        except Exception as pw_error:
+            pw_result = {
+                'success': False,
+                'error': f'Playwright fallback failed: {pw_error}',
+            }
         if pw_result.get('success'):
+            report_progress({'stage': '完成', 'progress': 100})
             # Build a result dict compatible with the yt-dlp path
             return {
                 'success': True,

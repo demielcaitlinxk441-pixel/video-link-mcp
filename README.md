@@ -36,6 +36,18 @@ chmod +x setup.sh
 
 ---
 
+## Windows 桌面下载器
+
+不想通过 Codex 或其他 MCP 客户端时，Windows 用户只需：
+
+1. 从 GitHub 下载项目并双击运行 `setup.bat`；
+2. 安装完成后，桌面会自动出现 **Video Link Analyzer** 快捷方式；
+3. 双击快捷方式，粘贴链接并选择保存位置，即可下载。
+
+这是独立桌面窗口，不是网页。默认下载位置为“视频 / Video Link Analyzer”，也可在窗口中自行选择其他文件夹；选择会保存在当前电脑。下载记录同样只保存在本机。
+
+---
+
 ## 功能概览
 
 | 工具 | 功能 | 说明 |
@@ -65,7 +77,7 @@ setup.bat
 
 脚本会自动：
 - 创建 Python 虚拟环境（`venv/`）
-- 安装核心依赖（`mcp`、`yt-dlp`）
+- 安装核心依赖（MCP、视频下载、Playwright 和桌面窗口）
 - 检查 ffmpeg 是否可用
 - 输出 MCP 配置 JSON
 
@@ -143,6 +155,9 @@ venv\Scripts\python.exe scripts\verify.py
 ```
 video-link-mcp/
 ├── server.py                 # MCP 服务器入口（定义 5 个工具）
+├── desktop_app.py            # Windows 桌面下载器入口
+├── assets/
+│   └── app-icon.ico          # 桌面快捷方式和窗口图标
 ├── lib/
 │   ├── __init__.py
 │   ├── detector.py           # 链接类型检测（URL匹配 + 页面分析）
@@ -158,7 +173,9 @@ video-link-mcp/
 │   ├── verify.py             # 离线自检脚本
 │   ├── intercept_download.py # Playwright 拦截下载独立脚本
 │   ├── download_direct.py    # 命令行直接下载脚本
-│   └── download_with_cookies.bat # 使用浏览器 Cookie 下载
+│   ├── download_with_cookies.bat # 使用浏览器 Cookie 下载
+│   ├── start_desktop_app.bat # 启动 Windows 桌面下载器
+│   └── create_desktop_shortcut.ps1 # 创建桌面快捷方式
 ├── mcp_config_example.json   # MCP 配置示例
 ├── mcp_http_config_example.json # HTTP MCP 配置示例
 ├── .gitignore               # Git 忽略规则（排除 venv/缓存/调试文件）
@@ -339,7 +356,7 @@ A: 任何 yt-dlp 支持的平台。完整列表见 [yt-dlp 支持站点](https:/
 
 **Q: 下载的文件保存在哪里？**
 
-A: 默认保存在系统临时目录的 `video-link-analyzer/` 子目录下。可通过 `output_dir` 参数指定其他路径。
+A: MCP 调用默认保存在系统临时目录的 `video-link-analyzer/` 子目录下，可通过 `output_dir` 参数指定。Windows 桌面下载器默认保存到“视频 / Video Link Analyzer”，也可在窗口里选择其他文件夹。
 
 **Q: 抖音下载报错 "Fresh cookies needed" 怎么办？**
 

@@ -13,9 +13,6 @@ anti-scraping (Douyin, TikTok) without needing cookies or browser lock access.
 
 import os
 import re
-import sys
-import json
-import time
 import tempfile
 import urllib.request
 from urllib.parse import urlparse

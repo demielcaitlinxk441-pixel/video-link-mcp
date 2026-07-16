@@ -7,7 +7,6 @@ Run: python scripts/verify.py
 
 import os
 import sys
-import json
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)

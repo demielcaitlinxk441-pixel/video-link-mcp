@@ -35,6 +35,16 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn('venv\\Scripts\\python.exe', source)
         self.assertIn('server.py" --transport http', source)
 
+    def test_windows_desktop_launcher_uses_the_project_virtual_environment(self):
+        source = (ROOT / 'scripts' / 'start_desktop_app.bat').read_text(encoding='utf-8')
+        self.assertIn('venv\\Scripts\\pythonw.exe', source)
+        self.assertIn('desktop_app.py', source)
+
+    def test_desktop_shortcut_uses_the_desktop_launcher_and_app_icon(self):
+        source = (ROOT / 'scripts' / 'create_desktop_shortcut.ps1').read_text(encoding='utf-8')
+        self.assertIn('assets\\app-icon.ico', source)
+        self.assertIn('start_desktop_app.bat', source)
+
     def test_http_example_uses_loopback_url(self):
         source = (ROOT / 'mcp_http_config_example.json').read_text(encoding='utf-8')
         self.assertIn('http://127.0.0.1:8000/mcp', source)

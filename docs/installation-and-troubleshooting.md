@@ -32,6 +32,18 @@ chmod +x setup.sh
 
 需要在无字幕视频上使用语音转文字时，运行安装脚本时附加 `--with-stt`。安装脚本会创建本机虚拟环境、安装 Chromium、执行自检并打印 stdio MCP 配置。
 
+## Windows 桌面下载器
+
+Windows 上完成 `setup.bat` 后，安装脚本会自动在桌面创建 **Video Link Analyzer** 快捷方式。双击它即可打开独立下载窗口：粘贴视频链接、选择保存文件夹，然后点击“开始下载”。
+
+若桌面快捷方式没有出现，可在项目目录双击运行：
+
+```bat
+scripts\start_desktop_app.bat
+```
+
+桌面下载器不需要 MCP 客户端；它与 MCP 共用相同的下载能力。下载位置与下载记录仅保存在当前电脑。
+
 支持 HTTP MCP 的客户端可在当前电脑启动本机服务：
 
 ```bat

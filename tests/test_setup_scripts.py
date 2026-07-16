@@ -11,6 +11,8 @@ class SetupScriptContractTests(unittest.TestCase):
         self.assertNotIn('pypi.tuna.tsinghua.edu.cn', script)
         self.assertIn('diagnose.py', script)
         self.assertIn('scripts\\verify.py', script)
+        self.assertIn('create_desktop_shortcut.ps1', script)
+        self.assertIn('start_desktop_app.bat', script)
 
     def test_windows_setup_prints_http_mcp_start_command(self):
         script = (ROOT / 'setup.bat').read_text(encoding='utf-8')
