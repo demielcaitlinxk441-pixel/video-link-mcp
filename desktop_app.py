@@ -13,7 +13,7 @@ from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar,
-    QVBoxLayout, QWidget, QFileDialog,
+    QVBoxLayout, QWidget, QFileDialog, QCheckBox,
 )
 
 from lib.downloader import download_video
@@ -44,19 +44,38 @@ def _remove_history_entry(entry_id: str) -> None:
     HISTORY_FILE.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def _saved_download_dir() -> Path:
+def _settings() -> dict:
     try:
-        value = json.loads(SETTINGS_FILE.read_text(encoding='utf-8')).get('download_dir')
-        if value:
-            return Path(value)
+        value = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+        return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
-        pass
-    return DOWNLOAD_DIR
+        return {}
+
+
+def _save_settings(settings: dict) -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False), encoding='utf-8')
+
+
+def _saved_download_dir() -> Path:
+    value = _settings().get('download_dir')
+    return Path(value) if value else DOWNLOAD_DIR
 
 
 def _save_download_dir(directory: Path) -> None:
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps({'download_dir': str(directory)}, ensure_ascii=False), encoding='utf-8')
+    settings = _settings()
+    settings['download_dir'] = str(directory)
+    _save_settings(settings)
+
+
+def _skip_history_delete_confirmation() -> bool:
+    return bool(_settings().get('skip_history_delete_confirmation', False))
+
+
+def _save_history_delete_confirmation_preference() -> None:
+    settings = _settings()
+    settings['skip_history_delete_confirmation'] = True
+    _save_settings(settings)
 
 
 def _human_size(value: int | None) -> str:
@@ -223,15 +242,7 @@ class MainWindow(QMainWindow):
             self._update_history_actions()
             return
 
-        title = entry.get('title', '这条下载记录')
-        answer = QMessageBox.question(
-            self,
-            '移除下载记录',
-            f'要从列表中移除“{title}”吗？\n\n视频文件会保留在电脑中。',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not self._confirm_history_deletion(entry.get('title', '这条下载记录')):
             return
         try:
             _remove_history_entry(entry['id'])
@@ -240,6 +251,31 @@ class MainWindow(QMainWindow):
             return
         self._load_history()
         self._show_hint('已从下载列表移除；视频文件没有删除。')
+
+    def _confirm_history_deletion(self, title: str) -> bool:
+        if _skip_history_delete_confirmation():
+            return True
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle('移除下载记录')
+        dialog.setText(f'要从列表中移除“{title}”吗？')
+        dialog.setInformativeText('视频文件会保留在电脑中。')
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        dont_ask_again = QCheckBox('以后不再提示')
+        dont_ask_again.setToolTip('之后删除下载记录时将直接执行。')
+        dialog.setCheckBox(dont_ask_again)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return False
+        if dont_ask_again.isChecked():
+            try:
+                _save_history_delete_confirmation_preference()
+            except OSError:
+                self._show_hint('本次会移除记录，但系统无法保存“不再提示”设置。', error=True)
+        return True
 
     def open_file(self, item):
         entry = item.data(Qt.ItemDataRole.UserRole)
