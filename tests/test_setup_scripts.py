@@ -17,6 +17,11 @@ class SetupScriptContractTests(unittest.TestCase):
         self.assertIn('setlocal EnableDelayedExpansion', script)
         self.assertIn('if !PROJECT_PATH_LENGTH! GTR 80', script)
         self.assertIn('"command": "%PYTHON%"', script)
+        self.assertIn('Python.Python.3.13', script)
+        helper = (ROOT / 'scripts' / 'ensure_ffmpeg.ps1').read_text(encoding='utf-8')
+        self.assertIn('Gyan.FFmpeg.Shared', helper)
+        self.assertIn('ensure_ffmpeg.ps1', script)
+        self.assertIn('winget install', script)
 
     def test_windows_launchers_fall_back_to_the_short_runtime_directory(self):
         for filename in ('start_desktop_app.bat', 'start_http_mcp.bat', 'download_with_cookies.bat'):

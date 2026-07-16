@@ -28,7 +28,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。若诊断提示未安装 ffmpeg，请按系统安装后重新运行 `diagnose.py`；桌面下载器的自动兼容 MP4 转换也需要它。
+需要无字幕语音转写时，在命令后加 `--with-stt`。安装脚本会创建本机 `venv/`、安装 Chromium、运行 `scripts/verify.py` 和 `diagnose.py`，并打印可复制的 MCP 配置。Windows 上若缺少 Python 或 ffmpeg，`setup.bat` 会通过系统自带的 winget 自动安装；自动兼容 MP4 转换也需要 ffmpeg。
 
 如果项目被放在很深的文件夹中，Windows 可能无法解压桌面窗口依赖。安装脚本会自动识别这种情况，并把运行环境放在当前用户的短路径本机目录中；不需要手动移动项目，桌面快捷方式和启动脚本仍可正常使用。
 
