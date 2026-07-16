@@ -30,7 +30,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-需要在无字幕视频上使用语音转文字时，运行安装脚本时附加 `--with-stt`。安装脚本会创建本机虚拟环境、安装 Chromium、执行自检并打印 stdio MCP 配置。
+需要在无字幕视频上使用语音转文字时，运行安装脚本时附加 `--with-stt`。安装脚本会创建本机虚拟环境、安装 Chromium、执行自检并打印 stdio MCP 配置。Windows 电脑若未安装 Python 或 ffmpeg，`setup.bat` 会使用 winget 自动安装它们；需保持联网，并使用带 Windows App Installer 的 Windows 10/11。
 
 如果项目所在文件夹层级很深，Windows 的路径长度限制可能影响桌面窗口依赖的安装。`setup.bat` 会自动改用当前用户本机的短路径运行环境，无须移动项目；完成后仍按正常方式使用桌面快捷方式和 MCP 配置即可。
 

@@ -10,9 +10,15 @@ if /I "%~1"=="--with-stt" set "WITH_STT=true"
 echo Video Link Analyzer MCP Server setup
 echo.
 
-python -c "import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)"
-if errorlevel 1 (
-    echo ERROR: Python 3.10 through 3.13 is required and must be in PATH.
+call :locate_python
+if not defined BASE_PYTHON (
+    echo Python 3.10 through 3.13 was not found. Installing Python 3.13...
+    call :install_python
+    if errorlevel 1 exit /b 1
+    call :locate_python
+)
+if not defined BASE_PYTHON (
+    echo ERROR: Python installation finished, but Python could not be located.
     exit /b 1
 )
 
@@ -27,7 +33,7 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 
 if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo Creating virtual environment...
-    python -m venv "%VENV_DIR%"
+    "%BASE_PYTHON%" -m venv "%VENV_DIR%"
     if errorlevel 1 exit /b 1
 )
 
@@ -51,13 +57,16 @@ if /I "%WITH_STT%"=="true" (
     if errorlevel 1 exit /b 1
 )
 
-where ffmpeg >nul 2>nul
-if errorlevel 1 (
-    echo WARNING: ffmpeg was not found. Video merging and transcription need it.
-    echo Install it with: winget install ffmpeg
-) else (
-    echo ffmpeg found.
+echo Checking or installing ffmpeg...
+set "FFMPEG_EXE="
+for /f "delims=" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\ensure_ffmpeg.ps1"') do set "FFMPEG_EXE=%%F"
+if errorlevel 1 exit /b 1
+if not defined FFMPEG_EXE (
+    echo ERROR: ffmpeg installation did not return an executable path.
+    exit /b 1
 )
+for %%F in ("%FFMPEG_EXE%") do set "PATH=%%~dpF;%PATH%"
+echo ffmpeg found.
 
 echo Running offline checks...
 "%PYTHON%" "%PROJECT_DIR%\scripts\verify.py"
@@ -94,3 +103,34 @@ echo.
 echo To use the desktop downloader, double-click "Video Link Analyzer" on your desktop.
 echo.
 echo Optional speech-to-text: setup.bat --with-stt
+goto :eof
+
+:locate_python
+set "BASE_PYTHON="
+for %%V in (3.13 3.12 3.11 3.10) do (
+    for /f "delims=" %%P in ('py -%%V -c "import sys; print(sys.executable)" 2^>nul') do (
+        if not defined BASE_PYTHON set "BASE_PYTHON=%%P"
+    )
+)
+if not defined BASE_PYTHON (
+    for %%P in ("%LOCALAPPDATA%\Programs\Python\Python313\python.exe" "%ProgramFiles%\Python313\python.exe") do (
+        if not defined BASE_PYTHON if exist "%%~fP" set "BASE_PYTHON=%%~fP"
+    )
+)
+if not defined BASE_PYTHON (
+    for /f "delims=" %%P in ('where python 2^>nul') do (
+        if not defined BASE_PYTHON (
+            "%%P" -c "import sys; raise SystemExit(0 if (3, 10) ^<= sys.version_info[:2] ^<= (3, 13) else 1)" >nul 2>nul && set "BASE_PYTHON=%%P"
+        )
+    )
+)
+exit /b 0
+
+:install_python
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Windows App Installer (winget) is required to install Python automatically.
+    exit /b 1
+)
+winget install --id Python.Python.3.13 --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+exit /b %errorlevel%
