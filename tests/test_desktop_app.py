@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 import desktop_app
 
@@ -23,6 +23,11 @@ class DesktopAppTests(unittest.TestCase):
     def test_first_screen_hides_task_card_until_a_link_is_submitted(self):
         self.assertTrue(self.window.task_card.isHidden())
         self.assertTrue(self.window.hint.isHidden())
+
+    def test_first_screen_has_no_promotional_heading(self):
+        self.assertIsNone(self.window.findChild(QLabel, 'brand'))
+        self.assertIsNone(self.window.findChild(QLabel, 'eyebrow'))
+        self.assertIsNone(self.window.findChild(QLabel, 'title'))
 
     def test_download_worker_reports_folder_or_downloader_failures(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
