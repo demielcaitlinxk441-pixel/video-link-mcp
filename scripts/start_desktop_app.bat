@@ -11,4 +11,4 @@ if not exist "%PYTHON%" (
   exit /b 1
 )
 
-start "Video Link Analyzer" /b "%PYTHON%" "%ROOT%\desktop_app.py"
+start "视频下载" /b "%PYTHON%" "%ROOT%\desktop_app.py"

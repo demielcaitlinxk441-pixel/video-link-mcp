@@ -20,10 +20,29 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 
+def _hidden_process_kwargs() -> dict:
+    """Keep helper tools such as ffmpeg from opening a console on Windows."""
+    if sys.platform != 'win32':
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        'creationflags': subprocess.CREATE_NO_WINDOW,
+        'startupinfo': startupinfo,
+    }
+
+
 def _is_wechat_channels(url: str) -> bool:
     """Check if URL is a WeChat Channels (视频号) link."""
     from .wechat_channels_api import is_wechat_channels
     return is_wechat_channels(url)
+
+
+def _is_kuaishou(url: str) -> bool:
+    """Check whether a URL belongs to Kuaishou (快手)."""
+    host = urlparse(url).netloc.lower()
+    return host == 'kuaishou.com' or host.endswith('.kuaishou.com') or host.endswith('.gifshow.com')
 
 
 def _handle_wechat_channels_download(url: str, output_dir: str, **kwargs) -> dict:
@@ -43,7 +62,10 @@ def _handle_wechat_channels_info(url: str, **kwargs) -> dict:
     return get_video_info(url, yuanbao_cookie=yuanbao_cookie)
 
 
-def _run_playwright_intercept(url: str, output_dir: Optional[str]) -> dict:
+def _run_playwright_intercept(
+    url: str, output_dir: Optional[str], *, allow_interactive_verification: bool = False,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict:
     """Run Playwright's synchronous API outside an MCP asyncio loop.
 
     FastMCP invokes tools while an asyncio loop is active. Playwright's
@@ -55,6 +77,11 @@ def _run_playwright_intercept(url: str, output_dir: Optional[str]) -> dict:
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='playwright-intercept'
     ) as executor:
+        if allow_interactive_verification or progress_callback:
+            return executor.submit(
+                intercept_download, url, output_dir, allow_interactive_verification,
+                progress_callback,
+            ).result()
         return executor.submit(intercept_download, url, output_dir).result()
 
 
@@ -66,6 +93,7 @@ def find_ffmpeg() -> Optional[str]:
             ['ffmpeg', '-version'],
             capture_output=True,
             timeout=5,
+            **_hidden_process_kwargs(),
         )
         if result.returncode == 0:
             return 'ffmpeg'
@@ -114,7 +142,8 @@ def _find_ffprobe(ffmpeg_path: Optional[str]) -> Optional[str]:
     for candidate in candidates:
         try:
             result = subprocess.run(
-                [candidate, '-version'], capture_output=True, timeout=5
+                [candidate, '-version'], capture_output=True, timeout=5,
+                **_hidden_process_kwargs(),
             )
             if result.returncode == 0:
                 return candidate
@@ -133,6 +162,7 @@ def _probe_media(path: str, ffprobe_path: str) -> Optional[dict]:
                 '-of', 'json', path,
             ],
             capture_output=True, timeout=30,
+            **_hidden_process_kwargs(),
         )
         if result.returncode == 0:
             return json.loads(result.stdout.decode('utf-8', errors='replace'))
@@ -183,6 +213,7 @@ def _decode_check(path: str, ffmpeg_path: str) -> bool:
                 '-map', '0:v:0', '-map', '0:a?', '-f', 'null', '-',
             ],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **_hidden_process_kwargs(),
         )
         return result.returncode == 0
     except FileNotFoundError:
@@ -203,6 +234,7 @@ def _transcode_to_compatible_mp4(source_path: str, target_path: str,
                 '-movflags', '+faststart', temporary_path,
             ],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **_hidden_process_kwargs(),
         )
         if result.returncode != 0 or not os.path.exists(temporary_path):
             return False
@@ -567,6 +599,23 @@ def download_video(
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
         return result
 
+    # yt-dlp 目前不支持快手新版分享页。直接进入可见浏览器流程，避免
+    # 先等待一次必然失败的解析。快手可能展示“浏览器版本过低”；用户需
+    # 在官方页面手动点击“点击重试”，程序只在用户操作后继续获取视频。
+    if _is_kuaishou(url):
+        report_progress({
+            'stage': '快手：等待你点击“点击重试”',
+            'message': '已打开快手窗口。若出现“浏览器版本过低”，请点击“点击重试”，并保持该窗口打开；程序会继续下载。',
+            'action_required': True,
+        })
+        result = _run_playwright_intercept(
+            url, output_dir, allow_interactive_verification=True,
+            progress_callback=report_progress,
+        )
+        result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
+        report_progress({'stage': '完成' if result.get('success') else '下载失败'})
+        return result
+
     try:
         import yt_dlp
     except ImportError:
@@ -690,8 +739,14 @@ def download_video(
         # Playwright intercept method as a last resort.
         # This is especially useful for Douyin / TikTok.
         try:
-            report_progress({'stage': '正在使用浏览器解析视频'})
-            pw_result = _run_playwright_intercept(url, output_dir)
+            if _is_kuaishou(url):
+                report_progress({'stage': '快手需要验证：请在弹出窗口完成滑块验证'})
+            else:
+                report_progress({'stage': '正在使用浏览器解析视频'})
+            pw_result = _run_playwright_intercept(
+                url, output_dir, allow_interactive_verification=_is_kuaishou(url),
+                progress_callback=report_progress,
+            )
         except ImportError:
             return {
                 'success': False,
