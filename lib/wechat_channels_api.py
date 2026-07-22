@@ -308,6 +308,20 @@ def is_worker_allowed() -> bool:
     return is_custom_worker_configured() or is_public_worker_allowed()
 
 
+def _resolve_yuanbao_cookie(value: Optional[str]) -> str:
+    """Prefer an explicit credential, then environment, then encrypted local storage."""
+    if value and value.strip():
+        return value.strip()
+    env_cookie = os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "").strip()
+    if env_cookie:
+        return env_cookie
+    try:
+        from .local_credentials import get_yuanbao_cookie
+        return get_yuanbao_cookie()
+    except Exception:
+        return ""
+
+
 def _parse_share_url_worker(share_url: str, timeout: int = 30) -> Optional[dict]:
     """
     Call the Cloudflare Worker API to parse a WeChat Channels share link.
@@ -360,14 +374,16 @@ def parse_share_link(
         Data dict containing feedInfo and authorInfo, or None on failure.
     """
     # Resolve cookie from parameter or env var
-    cookie = yuanbao_cookie or os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "")
+    cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
 
     if cookie:
-        # Direct mode — no third-party dependency
+        # Direct mode — no third-party dependency. Do not fall back to a
+        # public service after the user chose their own local authorization.
         data = _fetch_video_profile_direct(share_url, cookie)
         if data:
             return data
-        print("[wechat_channels_api] Direct API mode failed.")
+        print("[wechat_channels_api] Local direct API mode failed.")
+        return None
 
     if not is_worker_allowed():
         print(
@@ -411,14 +427,17 @@ def download_video(
     # Step 1: Parse share link
     data = parse_share_link(share_url, yuanbao_cookie)
     if not data:
-        cookie = yuanbao_cookie or os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "")
-        error = "Failed to parse WeChat Channels share link via direct API"
-        if not cookie and not is_worker_allowed():
+        cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
+        if cookie:
+            error = "本机视频号授权无法解析此链接。请确认授权仍有效后重试。"
+        elif not is_worker_allowed():
             error = (
                 "Worker fallback is disabled. Configure "
                 "WECHAT_CHANNELS_YUANBAO_COOKIE, WECHAT_CHANNELS_WORKER_URL, "
                 "or WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true."
             )
+        else:
+            error = "公共视频号解析服务暂时无法解析此链接。请配置本机视频号授权后重试。"
         return {
             "success": False,
             "error": error,
@@ -459,7 +478,7 @@ def download_video(
         safe_title = "wechat_channels_video"
 
     # Determine which mode was used
-    cookie = yuanbao_cookie or os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "")
+    cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
     download_method = "wechat_channels_direct" if cookie else "wechat_channels_worker"
 
     # Step 2: Download video
@@ -555,14 +574,17 @@ def get_video_info(
     """
     data = parse_share_link(share_url, yuanbao_cookie)
     if not data:
-        cookie = yuanbao_cookie or os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "")
-        error = "Failed to parse WeChat Channels share link"
-        if not cookie and not is_worker_allowed():
+        cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
+        if cookie:
+            error = "本机视频号授权无法解析此链接。请确认授权仍有效后重试。"
+        elif not is_worker_allowed():
             error = (
                 "Worker fallback is disabled. Configure "
                 "WECHAT_CHANNELS_YUANBAO_COOKIE, WECHAT_CHANNELS_WORKER_URL, "
                 "or WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true."
             )
+        else:
+            error = "公共视频号解析服务暂时无法解析此链接。请配置本机视频号授权后重试。"
         return {
             "success": False,
             "error": error,
@@ -573,7 +595,7 @@ def get_video_info(
     description = feed_info.get("description", "")
     title = description.split("\n")[0][:80] if description else "WeChat Channels Video"
 
-    cookie = yuanbao_cookie or os.environ.get("WECHAT_CHANNELS_YUANBAO_COOKIE", "")
+    cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
     method = "wechat_channels_direct" if cookie else "wechat_channels_worker"
 
     return {
