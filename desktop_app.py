@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar, QMenu,
     QVBoxLayout, QWidget, QFileDialog, QScrollArea, QPlainTextEdit, QSizePolicy,
+    QDialog, QDialogButtonBox, QLineEdit,
 )
 
 from lib.downloader import download_video
@@ -82,6 +83,12 @@ class DownloadEvents(QObject):
     finished = Signal(str, dict)
 
 
+class AuthorizationEvents(QObject):
+    opened = Signal()
+    success = Signal()
+    error = Signal(str)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -92,6 +99,7 @@ class MainWindow(QMainWindow):
         self.job_order: list[str] = []
         self.pending_job_ids: list[str] = []
         self.active_job_ids: set[str] = set()
+        self.authorization_session = None
         self.paused = False
         self.max_parallel_downloads = 2
         self.output_dir = _saved_download_dir()
@@ -117,6 +125,7 @@ class MainWindow(QMainWindow):
         label = QLabel('保存位置'); label.setObjectName('destinationLabel'); destination.addWidget(label)
         self.destination_path = QLabel(); self.destination_path.setObjectName('destinationPath'); destination.addWidget(self.destination_path, 1)
         self.folder_button = QPushButton('选择文件夹'); self.folder_button.setObjectName('folderButton'); self.folder_button.clicked.connect(self.choose_folder); destination.addWidget(self.folder_button)
+        self.authorization_button = QPushButton('视频号授权'); self.authorization_button.setObjectName('authorizationButton'); self.authorization_button.clicked.connect(self.show_wechat_authorization); destination.addWidget(self.authorization_button)
         layout.addLayout(destination)
         self._refresh_destination()
         self.hint = QLabel(); self.hint.setObjectName('hint'); self.hint.hide(); layout.addWidget(self.hint)
@@ -163,6 +172,131 @@ class MainWindow(QMainWindow):
                 self._show_hint('已选择新位置，但系统无法记住它；本次下载仍会使用该位置。', error=True)
             else:
                 self._show_hint('已保存新的下载位置，之后的下载都会使用这里。')
+
+    def show_wechat_authorization(self):
+        """Store the owner's Yuanbao credential locally with Windows encryption."""
+        from lib.local_credentials import clear_yuanbao_cookie, get_yuanbao_cookie, save_yuanbao_cookie
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('视频号授权')
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        heading = QLabel('使用本人授权账号解析视频号链接')
+        heading.setObjectName('authorizationTitle')
+        layout.addWidget(heading)
+        explanation = QLabel('一键授权会打开独立的元宝登录窗口。你自己登录后，程序只将本次授权加密保存在本机。')
+        explanation.setWordWrap(True)
+        explanation.setObjectName('authorizationHelp')
+        layout.addWidget(explanation)
+        reauthorize_button = QPushButton('一键重新授权')
+        reauthorize_button.setObjectName('reauthorizeButton')
+        reauthorize_button.setAccessibleName('一键重新授权')
+        layout.addWidget(reauthorize_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        finish_button = QPushButton('完成登录')
+        finish_button.setObjectName('authorizationButton')
+        finish_button.setEnabled(False)
+        finish_button.hide()
+        layout.addWidget(finish_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        manual_button = QPushButton('手动输入 Cookie')
+        manual_button.setObjectName('manualAuthorizationButton')
+        layout.addWidget(manual_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        label = QLabel('元宝 Cookie')
+        label.hide()
+        layout.addWidget(label)
+        cookie_input = QLineEdit()
+        cookie_input.setObjectName('authorizationInput')
+        cookie_input.setEchoMode(QLineEdit.EchoMode.Password)
+        cookie_input.setPlaceholderText('粘贴后点击保存')
+        cookie_input.setAccessibleName('元宝 Cookie')
+        cookie_input.hide()
+        layout.addWidget(cookie_input)
+        configured = bool(get_yuanbao_cookie())
+        state = QLabel('当前状态：已配置本机授权' if configured else '当前状态：未配置本机授权')
+        state.setObjectName('authorizationState')
+        layout.addWidget(state)
+        clear_button = QPushButton('清除本机授权')
+        clear_button.setObjectName('removeJobButton')
+        clear_button.setEnabled(configured)
+        layout.addWidget(clear_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存授权')
+        buttons.button(QDialogButtonBox.StandardButton.Save).hide()
+        buttons.accepted.connect(lambda: self._save_wechat_authorization(cookie_input, dialog))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def clear_authorization():
+            clear_yuanbao_cookie()
+            state.setText('当前状态：未配置本机授权')
+            clear_button.setEnabled(False)
+            self._show_hint('已清除本机视频号授权。')
+
+        clear_button.clicked.connect(clear_authorization)
+        manual_button.clicked.connect(lambda: (
+            label.setVisible(not label.isVisible()),
+            cookie_input.setVisible(not cookie_input.isVisible()),
+            buttons.button(QDialogButtonBox.StandardButton.Save).setVisible(
+                cookie_input.isVisible()
+            ),
+            manual_button.setText('收起手动输入' if cookie_input.isVisible() else '手动输入 Cookie'),
+        ))
+
+        auth_events = AuthorizationEvents(dialog)
+
+        def begin_reauthorization():
+            from lib.yuanbao_authorization import YuanbaoAuthorizationSession
+
+            reauthorize_button.setEnabled(False)
+            state.setText('正在打开元宝登录窗口…')
+            self.authorization_session = YuanbaoAuthorizationSession(
+                auth_events.opened.emit, auth_events.success.emit, auth_events.error.emit
+            )
+            self.authorization_session.start()
+
+        def authorization_opened():
+            state.setText('已打开元宝。完成本人登录后，回到这里点击“完成登录”。')
+            finish_button.show()
+            finish_button.setEnabled(True)
+
+        def finish_reauthorization():
+            finish_button.setEnabled(False)
+            state.setText('正在保存本机授权…')
+            if self.authorization_session:
+                self.authorization_session.finish_login()
+
+        def authorization_success():
+            self.authorization_session = None
+            self._show_hint('本机视频号授权已更新。之后的视频号链接将优先使用你的账号解析。')
+            dialog.accept()
+
+        def authorization_error(message: str):
+            self.authorization_session = None
+            reauthorize_button.setEnabled(True)
+            finish_button.hide()
+            state.setText(message)
+            state.setObjectName('authorizationError')
+            state.style().unpolish(state)
+            state.style().polish(state)
+
+        auth_events.opened.connect(authorization_opened)
+        auth_events.success.connect(authorization_success)
+        auth_events.error.connect(authorization_error)
+        reauthorize_button.clicked.connect(begin_reauthorization)
+        finish_button.clicked.connect(finish_reauthorization)
+        dialog.rejected.connect(lambda: self.authorization_session.cancel() if self.authorization_session else None)
+        dialog.exec()
+
+    def _save_wechat_authorization(self, cookie_input: QLineEdit, dialog: QDialog):
+        from lib.local_credentials import save_yuanbao_cookie
+        try:
+            save_yuanbao_cookie(cookie_input.text())
+        except (OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.warning(dialog, '无法保存授权', str(exc))
+            return
+        self._show_hint('本机视频号授权已保存。之后的视频号链接将优先使用你的账号解析。')
+        dialog.accept()
 
     @staticmethod
     def _extract_urls(text: str) -> list[str]:
@@ -441,6 +575,16 @@ def main():
         QMenu { background: #ffffff; color: #243147; border-color: #d0dbea; }
         QMenu::item:selected { background: #e6edff; }
         QMenu::separator { background: #e1e7f0; }
+        #authorizationButton, #manualAuthorizationButton { background: #eef4ff; border: 1px solid #b9caef; color: #415d9f; border-radius: 9px; padding: 8px 12px; min-height: 34px; font-size: 13px; }
+        #authorizationButton:hover, #manualAuthorizationButton:hover { background: #e0ebff; border-color: #8da9e5; }
+        #reauthorizeButton { background: #5478e8; border: 1px solid #5478e8; color: #ffffff; border-radius: 9px; padding: 8px 16px; min-height: 36px; font-size: 14px; font-weight: 600; }
+        #reauthorizeButton:hover { background: #466ad6; }
+        #reauthorizeButton:disabled, #authorizationButton:disabled { background: #edf1f8; border-color: #d7dfeb; color: #9aa8bb; }
+        #authorizationTitle { color: #243147; font-size: 18px; font-weight: 700; }
+        #authorizationHelp, #authorizationState { color: #68778e; font-size: 13px; }
+        #authorizationError { color: #b84b5d; font-size: 13px; }
+        #authorizationInput { min-height: 34px; border: 1px solid #bfcde1; border-radius: 8px; padding: 0 10px; color: #243147; background: #ffffff; }
+        #authorizationInput:focus { border: 2px solid #6685e8; }
     ''')
     window = MainWindow(); window.show(); sys.exit(app.exec())
 
