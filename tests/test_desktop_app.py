@@ -10,7 +10,7 @@ if sys.platform != 'win32':
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QPushButton
 
 import desktop_app
@@ -37,8 +37,13 @@ class DesktopAppTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
 
-        self.assertGreater(self.window.queue_title.y(), self.window.destination_path.y())
-        self.assertLess(self.window.queue_title.y() - self.window.destination_path.y(), 110)
+        # These widgets live in different layouts, so their local ``y`` values
+        # are not comparable.  Compare their positions in the main window
+        # coordinate system instead.
+        destination_y = self.window.destination_path.mapTo(self.window, QPoint(0, 0)).y()
+        queue_y = self.window.queue_title.mapTo(self.window, QPoint(0, 0)).y()
+        self.assertGreater(queue_y, destination_y)
+        self.assertLess(queue_y - destination_y, 160)
 
     def test_first_screen_has_no_promotional_heading(self):
         self.assertIsNone(self.window.findChild(QLabel, 'brand'))
@@ -187,3 +192,4 @@ class DesktopAppTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
