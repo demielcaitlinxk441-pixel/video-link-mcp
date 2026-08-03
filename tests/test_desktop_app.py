@@ -37,8 +37,8 @@ class DesktopAppTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
 
-        # These widgets live in different layouts, so their local ``y`` values
-        # are not comparable.  Compare their positions in the main window
+        # These widgets live in different layouts, so their local y values
+        # are not comparable. Compare their positions in the main window
         # coordinate system instead.
         destination_y = self.window.destination_path.mapTo(self.window, QPoint(0, 0)).y()
         queue_y = self.window.queue_title.mapTo(self.window, QPoint(0, 0)).y()
@@ -192,4 +192,3 @@ class DesktopAppTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
