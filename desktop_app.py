@@ -1,15 +1,20 @@
 """Native Windows desktop video downloader."""
 
 import json
+import math
 import os
 import re
+import shutil
 import sys
 import threading
 import time
 import uuid
+import sqlite3
+import urllib.request
+import urllib.error
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal, QUrl
+from PySide6.QtCore import QObject, Qt, Signal, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QListWidget,
@@ -24,7 +29,324 @@ ROOT = Path(__file__).resolve().parent
 APP_DIR = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'VideoLinkAnalyzer'
 HISTORY_FILE = APP_DIR / 'history.json'
 SETTINGS_FILE = APP_DIR / 'settings.json'
-DOWNLOAD_DIR = Path.home() / 'Videos' / 'Video Link Analyzer'
+# Keep the repository portable: a machine-specific Vault is stored in settings.
+DEFAULT_OBSIDIAN_VAULT = Path.home() / 'Videos' / 'VideoLinkAnalyzerVault'
+OBSIDIAN_VAULT = DEFAULT_OBSIDIAN_VAULT
+OBSIDIAN_VIDEO_DIR = OBSIDIAN_VAULT / '视频库'
+OBSIDIAN_RECORD_DIR = OBSIDIAN_VIDEO_DIR / '记录'
+INDEX_DB = OBSIDIAN_VIDEO_DIR / '视频索引.sqlite3'
+MEMORY_FILE = OBSIDIAN_VIDEO_DIR / 'AI对话记忆.md'
+
+CONTENT_CATEGORIES = {
+    '教程': ('教程', '教学', '课程', '入门', 'how to', 'tutorial', '实操', '方法'),
+    '设计': ('设计', 'ui', 'ux', '视觉', '交互', '平面', '字体', '品牌', 'figma'),
+    '编程': ('编程', '代码', 'python', 'javascript', '程序', '开发', 'api', '软件', '前端', '后端'),
+    '产品': ('产品', '产品经理', '需求', '用户体验', '增长', 'app', '功能分析'),
+    '营销': ('营销', '广告', '运营', '品牌营销', '投放', '社媒', '内容营销'),
+    '旅行': ('旅行', '旅游', '攻略', '景点', '酒店', '美食', 'vlog'),
+    '影视': ('电影', '电视剧', '纪录片', '剪辑', '综艺', '音乐', 'mv'),
+}
+
+
+def _classify_content(result: dict, title: str) -> str:
+    if result.get('ai_category'):
+        return str(result['ai_category'])
+    metadata = result.get('metadata') or {}
+    text = ' '.join(str(metadata.get(key) or '') for key in ('title', 'description', 'channel', 'uploader'))
+    text += ' ' + str(result.get('subtitle_text') or '')[:12000]
+    text = text.lower()
+    scores = {
+        category: sum(text.count(keyword.lower()) for keyword in keywords)
+        for category, keywords in CONTENT_CATEGORIES.items()
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else '其他'
+
+
+def _ai_classify_content(result: dict, title: str) -> dict:
+    """Ask the configured OpenAI-compatible endpoint for semantic metadata."""
+    api_key = os.environ.get('AGNES_API_KEY')
+    endpoint = os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions')
+    model = os.environ.get('AGNES_MODEL', 'agnes-2.5-flash')
+    if not api_key:
+        return {}
+    metadata = result.get('metadata') or {}
+    context = (
+        f"标题：{title}\n"
+        f"简介：{metadata.get('description', '')}\n"
+        f"频道：{metadata.get('channel', '') or metadata.get('uploader', '')}\n"
+        f"字幕：{(result.get('subtitle_text') or '')[:12000]}"
+    )
+    prompt = (
+        '请分析这段视频资料并返回严格 JSON，不要 Markdown。'
+        'category 只能是：教程、设计、编程、产品、营销、旅行、影视、其他。'
+        'tags 返回 3-8 个中文关键词，summary 返回不超过120字的中文摘要。\n\n'
+        + context
+    )
+    body = json.dumps({
+        'model': model,
+        'temperature': 0.1,
+        'messages': [
+            {'role': 'system', 'content': '你是个人视频知识库整理助手。'},
+            {'role': 'user', 'content': prompt},
+        ],
+    }, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        content = payload['choices'][0]['message']['content'].strip()
+        content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content).strip()
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', content, flags=re.S)
+            if not match:
+                return {}
+            data = json.loads(match.group(0))
+        category = str(data.get('category') or '其他')
+        if category not in CONTENT_CATEGORIES and category != '其他':
+            category = '其他'
+        tags = data.get('tags') if isinstance(data.get('tags'), list) else []
+        return {'ai_category': category, 'ai_tags': [str(tag) for tag in tags[:8]], 'ai_summary': str(data.get('summary') or '')}
+    except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError):
+        return {}
+
+
+def _record_frontmatter(text: str) -> dict:
+    values = {}
+    match = re.match(r'^---\s*\n(.*?)\n---', text, flags=re.S)
+    if match:
+        for line in match.group(1).splitlines():
+            key, sep, value = line.partition(':')
+            if sep:
+                values[key.strip()] = value.strip().strip('"')
+    return values
+
+
+def _sync_search_index() -> None:
+    INDEX_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(INDEX_DB) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS records (path TEXT PRIMARY KEY, mtime REAL, title TEXT, category TEXT, tags TEXT, content TEXT)')
+        paths = list(OBSIDIAN_RECORD_DIR.rglob('*.md')) if OBSIDIAN_RECORD_DIR.exists() else []
+        existing = {str(path) for path in paths}
+        indexed = [row[0] for row in db.execute('SELECT path FROM records').fetchall()]
+        for stale_path in indexed:
+            if stale_path not in existing:
+                db.execute('DELETE FROM records WHERE path = ?', (stale_path,))
+        for path in paths:
+            mtime = path.stat().st_mtime
+            row = db.execute('SELECT mtime FROM records WHERE path = ?', (str(path),)).fetchone()
+            if row and row[0] >= mtime:
+                continue
+            text = path.read_text(encoding='utf-8', errors='replace')
+            front = _record_frontmatter(text)
+            db.execute('INSERT OR REPLACE INTO records(path,mtime,title,category,tags,content) VALUES(?,?,?,?,?,?)',
+                       (str(path), mtime, front.get('title', path.stem), front.get('category', ''), front.get('tags', ''), text))
+        db.commit()
+
+
+def _search_database(question: str, limit: int = 10, fallback: bool = True) -> list[str]:
+    _sync_search_index()
+    terms = re.findall(r'[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}', question.lower())
+    with sqlite3.connect(INDEX_DB) as db:
+        rows = db.execute('SELECT path,title,category,tags,content FROM records').fetchall()
+    def grams(value: str) -> dict[str, int]:
+        compact = re.sub(r'\s+', '', value.lower())
+        return {compact[i:i + 2]: compact.count(compact[i:i + 2]) for i in range(max(0, len(compact) - 1))}
+    query_grams = grams(question)
+    scored = []
+    for path, title, category, tags, content in rows:
+        haystack = f'{title} {category} {tags} {content}'.lower()
+        keyword_score = sum(haystack.count(term) for term in terms)
+        record_grams = grams(haystack)
+        overlap = sum(count * record_grams.get(token, 0) for token, count in query_grams.items())
+        qnorm = math.sqrt(sum(value * value for value in query_grams.values())) or 1
+        rnorm = math.sqrt(sum(value * value for value in record_grams.values())) or 1
+        score = keyword_score * 10 + overlap / (qnorm * rnorm)
+        scored.append((score, f'来源记录：{path}\n{content}'))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    hits = [content for score, content in scored if score > 0][:limit]
+    if hits:
+        return hits
+    return [content for _, content in scored[:limit]] if fallback else []
+
+
+def _expand_query(question: str) -> str:
+    """Use the chat model to add search terms without sending vault records."""
+    api_key = os.environ.get('AGNES_API_KEY')
+    if not api_key:
+        return question
+    body = json.dumps({
+        'model': os.environ.get('AGNES_QUERY_MODEL', 'agnes-1.5-flash'),
+        'temperature': 0,
+        'messages': [
+            {'role': 'system', 'content': '你是检索词生成器，只输出逗号分隔的中文关键词和同义词，不要解释。'},
+            {'role': 'user', 'content': f'为视频知识库检索扩展这个问题：{question}'},
+        ],
+    }, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(
+        os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'),
+        data=body,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        expansion = str(payload['choices'][0]['message']['content']).strip()
+        return f'{question} {expansion[:300]}'
+    except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError):
+        return question
+
+
+def _query_ai_database(question: str, conversation: list[dict] | None = None) -> str:
+    """Answer a question using the Markdown records in the active video vault."""
+    api_key = os.environ.get('AGNES_API_KEY')
+    if not api_key:
+        return '尚未配置 AI API Key。'
+    records = _search_database(question, fallback=False)
+    if not records:
+        expanded_question = _expand_query(question)
+        records = _search_database(expanded_question)
+    if not records:
+        records = _search_database(question, fallback=True)
+    context = '\n\n---\n\n'.join(record[:5000] for record in records) or '当前视频库还没有记录。'
+    long_term_memory = _relevant_long_term_memory(question)
+    prompt = (
+        '你是本地视频知识库助手。请只根据下面的数据库记录回答用户问题；'
+        '如果记录中没有答案，请明确说“数据库中没有找到相关内容”，不要编造。'
+        '回答最后列出相关视频标题和来源记录路径。'
+        f'\n\n数据库记录：\n{context}'
+        f'\n\n长期对话记忆：\n{long_term_memory or "暂无"}'
+        f'\n\n用户问题：{question}'
+    )
+    messages = [{'role': 'system', 'content': '你是严谨的视频知识库问答助手。'}]
+    messages.extend((conversation or [])[-8:])
+    messages.append({'role': 'user', 'content': prompt})
+    body = json.dumps({
+        'model': os.environ.get('AGNES_MODEL', 'agnes-2.5-flash'),
+        'temperature': 0.2,
+        'messages': messages,
+    }, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(
+        os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'),
+        data=body,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        return str(payload['choices'][0]['message']['content']).strip()
+    except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError) as exc:
+        return f'AI 查询失败：{exc}'
+
+
+def _save_conversation_memory(question: str, answer: str) -> None:
+    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    with MEMORY_FILE.open('a', encoding='utf-8') as handle:
+        handle.write(f'\n## {stamp}\n\n**用户：** {question}\n\n**AI：** {answer}\n')
+    try:
+        content = MEMORY_FILE.read_text(encoding='utf-8')
+        if len(content) > 100000:
+            sections = content.split('\n## ')
+            MEMORY_FILE.write_text('\n## '.join([''] + sections[-40:]), encoding='utf-8')
+    except OSError:
+        pass
+
+
+def _relevant_long_term_memory(question: str, limit: int = 5000) -> str:
+    try:
+        content = MEMORY_FILE.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return ''
+    sections = [section for section in content.split('\n## ') if section.strip()]
+    if not sections:
+        return ''
+    terms = re.findall(r'[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}', question.lower())
+    references_past = any(word in question for word in ('刚才', '之前', '上次', '记得', '我们说过'))
+    scored = []
+    for index, section in enumerate(sections):
+        lower = section.lower()
+        score = sum(lower.count(term) for term in terms) + (index / max(1, len(sections)) if references_past else 0)
+        scored.append((score, index, section))
+    matches = [item for item in sorted(scored, reverse=True) if item[0] > 0]
+    if not matches:
+        matches = sorted(scored, key=lambda item: item[1], reverse=True)[:1] if references_past else []
+    selected = []
+    total = 0
+    for _, _, section in matches[:6]:
+        if total + len(section) > limit:
+            break
+        selected.append(section)
+        total += len(section)
+    return '\n\n---\n\n'.join(selected)
+
+
+def _organize_video(result: dict, title: str) -> str:
+    """Move a selected video and subtitle into a content category folder."""
+    category = _classify_content(result, title)
+    video_path = Path(result.get('video_path', ''))
+    if video_path.is_file():
+        target_dir = OBSIDIAN_VIDEO_DIR / category
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / video_path.name
+        if target.resolve() != video_path.resolve():
+            if target.exists():
+                target = target_dir / f'{video_path.stem}-{int(time.time())}{video_path.suffix}'
+            shutil.move(str(video_path), str(target))
+            result['video_path'] = str(target)
+        subtitle_path = result.get('subtitle_path')
+        if subtitle_path and Path(subtitle_path).exists():
+            subtitle = Path(subtitle_path)
+            subtitle_target = target_dir / subtitle.name
+            if subtitle_target.resolve() != subtitle.resolve():
+                shutil.move(str(subtitle), str(subtitle_target))
+            result['subtitle_path'] = str(subtitle_target)
+    result['category'] = category
+    return category
+
+
+def _obsidian_value(value: object) -> str:
+    """Encode a frontmatter value as a safe YAML double-quoted string."""
+    return json.dumps(str(value or ''), ensure_ascii=False)
+
+
+def _write_obsidian_record(source_url: str, result: dict, title: str) -> None:
+    """Create one Obsidian record for a successfully downloaded video."""
+    video_path = Path(result.get('video_path', ''))
+    if not video_path.exists() or not video_path.is_relative_to(OBSIDIAN_VAULT):
+        return
+    OBSIDIAN_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    relative_video = video_path.relative_to(OBSIDIAN_VAULT).as_posix()
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip(' .') or video_path.stem
+    record_path = OBSIDIAN_RECORD_DIR / f'{safe_name}.md'
+    if record_path.exists():
+        record_path = OBSIDIAN_RECORD_DIR / f'{safe_name}-{int(time.time())}.md'
+    metadata = result.get('metadata') or {}
+    category = result.get('category') or '其他'
+    downloaded_at = time.strftime('%Y-%m-%d %H:%M:%S')
+    content = (
+        '---\n'
+        f'title: {_obsidian_value(title)}\n'
+        f'platform: {_obsidian_value(metadata.get("platform", ""))}\n'
+        f'category: {_obsidian_value(category)}\n'
+        f'ai_summary: {_obsidian_value(result.get("ai_summary", ""))}\n'
+        f'downloaded_at: {_obsidian_value(downloaded_at)}\n'
+        'tags:\n  - video-download\n'
+        f'  - {category}\n'
+        + ''.join(f'  - {tag}\n' for tag in result.get('ai_tags', []))
+        + '---\n\n'
+        f'# {title}\n\n'
+    )
+    record_path.write_text(content, encoding='utf-8')
 
 
 def _history() -> list[dict]:
@@ -54,20 +376,24 @@ def _settings() -> dict:
         return {}
 
 
+def _knowledge_vault() -> Path:
+    configured = _settings().get('knowledge_vault') or os.environ.get('VIDEO_KNOWLEDGE_VAULT')
+    return Path(configured) if configured else DEFAULT_OBSIDIAN_VAULT
+
+
+def _set_knowledge_vault(vault: Path) -> None:
+    """Update the active vault paths used by the indexer and record writer."""
+    global OBSIDIAN_VAULT, OBSIDIAN_VIDEO_DIR, OBSIDIAN_RECORD_DIR, INDEX_DB, MEMORY_FILE
+    OBSIDIAN_VAULT = Path(vault).expanduser()
+    OBSIDIAN_VIDEO_DIR = OBSIDIAN_VAULT / '视频库'
+    OBSIDIAN_RECORD_DIR = OBSIDIAN_VIDEO_DIR / '记录'
+    INDEX_DB = OBSIDIAN_VIDEO_DIR / '视频索引.sqlite3'
+    MEMORY_FILE = OBSIDIAN_VIDEO_DIR / 'AI对话记忆.md'
+
+
 def _save_settings(settings: dict) -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False), encoding='utf-8')
-
-
-def _saved_download_dir() -> Path:
-    value = _settings().get('download_dir')
-    return Path(value) if value else DOWNLOAD_DIR
-
-
-def _save_download_dir(directory: Path) -> None:
-    settings = _settings()
-    settings['download_dir'] = str(directory)
-    _save_settings(settings)
 
 
 def _human_size(value: int | None) -> str:
@@ -89,12 +415,61 @@ class AuthorizationEvents(QObject):
     error = Signal(str)
 
 
+class ChatEvents(QObject):
+    response = Signal(str)
+
+
+class KnowledgeBaseEvents(QObject):
+    finished = Signal(str, bool, str)
+
+
+class ChatPanel(QFrame):
+    """Frameless floating panel that can be dragged by its surface."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_offset = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        settings = _settings()
+        configured_vault = settings.get('knowledge_vault')
+        _set_knowledge_vault(_knowledge_vault())
+        if not configured_vault and DEFAULT_OBSIDIAN_VAULT.exists():
+            settings['knowledge_vault'] = str(DEFAULT_OBSIDIAN_VAULT)
+            try:
+                _save_settings(settings)
+            except OSError:
+                pass
+        self._needs_vault_prompt = not OBSIDIAN_VAULT.exists()
         self.events = DownloadEvents()
         self.events.progress.connect(self._update_progress)
         self.events.finished.connect(self._finished)
+        self.chat_events = ChatEvents()
+        self.chat_events.response.connect(self._show_chat_response)
+        self.knowledge_events = KnowledgeBaseEvents()
+        self.knowledge_events.finished.connect(self._knowledge_base_finished)
+        self._knowledge_add_ids: set[str] = set()
+        self.chat_messages: list[dict] = []
         self.jobs: dict[str, dict] = {}
         self.job_order: list[str] = []
         self.pending_job_ids: list[str] = []
@@ -102,7 +477,9 @@ class MainWindow(QMainWindow):
         self.authorization_session = None
         self.paused = False
         self.max_parallel_downloads = 2
-        self.output_dir = _saved_download_dir()
+        # One selected root controls both the local Vault and the download folder.
+        # Videos stay in <vault>/视频库 until the user explicitly adds one to the KB.
+        self.output_dir = OBSIDIAN_VIDEO_DIR
         self.setWindowTitle('视频下载')
         self.setMinimumSize(980, 680)
         self.resize(1180, 760)
@@ -122,14 +499,15 @@ class MainWindow(QMainWindow):
         self.button = QPushButton('加入下载队列'); self.button.clicked.connect(self.start_download); self.button.setObjectName('downloadButton'); card_layout.addWidget(self.button)
         layout.addWidget(card)
         destination = QHBoxLayout(); destination.setSpacing(10)
-        label = QLabel('保存位置'); label.setObjectName('destinationLabel'); destination.addWidget(label)
-        self.destination_path = QLabel(); self.destination_path.setObjectName('destinationPath'); destination.addWidget(self.destination_path, 1)
-        self.folder_button = QPushButton('选择文件夹'); self.folder_button.setObjectName('folderButton'); self.folder_button.clicked.connect(self.choose_folder); destination.addWidget(self.folder_button)
+        label = QLabel('下载与知识库'); label.setObjectName('destinationLabel'); destination.addWidget(label)
+        self.destination_path = QLabel(); self.destination_path.setObjectName('destinationPath'); self.destination_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed); destination.addWidget(self.destination_path, 1)
+        self.folder_button = QPushButton('选择位置'); self.folder_button.setObjectName('folderButton'); self.folder_button.clicked.connect(self.choose_folder); destination.addWidget(self.folder_button)
         self.authorization_button = QPushButton('视频号授权'); self.authorization_button.setObjectName('authorizationButton'); self.authorization_button.clicked.connect(self.show_wechat_authorization); destination.addWidget(self.authorization_button)
+        self.chat_toggle_button = QPushButton('AI'); self.chat_toggle_button.setObjectName('chatToggleButton'); self.chat_toggle_button.setToolTip('展开或收起 AI 知识库助手'); self.chat_toggle_button.setFixedWidth(46); self.chat_toggle_button.clicked.connect(self.toggle_chat_dock); destination.addWidget(self.chat_toggle_button)
         layout.addLayout(destination)
         self._refresh_destination()
         self.hint = QLabel(); self.hint.setObjectName('hint'); self.hint.hide(); layout.addWidget(self.hint)
-        columns = QHBoxLayout(); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(32)
+        columns = QHBoxLayout(); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(24)
         left = QVBoxLayout(); task_header = QHBoxLayout(); header = QLabel('下载队列'); header.setObjectName('sectionTitle'); self.queue_title = header; task_header.addWidget(header)
         self.queue_summary = QLabel(''); self.queue_summary.setObjectName('queueSummary'); task_header.addWidget(self.queue_summary, 1)
         self.pause_button = QPushButton('暂停队列'); self.pause_button.setObjectName('queueButton'); self.pause_button.setToolTip('正在下载的视频会继续完成；暂停后不会启动等待中的任务。'); self.pause_button.setFixedWidth(104); self.pause_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed); self.pause_button.clicked.connect(self.toggle_pause); task_header.addWidget(self.pause_button)
@@ -143,16 +521,129 @@ class MainWindow(QMainWindow):
         self.task_list = QVBoxLayout(self.task_list_widget); self.task_list.setContentsMargins(0, 0, 0, 0); self.task_list.setSpacing(10); self.task_list.addStretch()
         self.task_scroll.setWidget(self.task_list_widget); task.addWidget(self.task_scroll); left.addWidget(self.task_card)
         self.task_card.hide()
+        self.empty_queue = QLabel('暂无下载任务\n粘贴视频链接后开始下载')
+        self.empty_queue.setObjectName('emptyState')
+        self.empty_queue.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_queue.setMinimumHeight(118)
+        left.addWidget(self.empty_queue)
         right = QVBoxLayout(); history_title = QLabel('最近下载'); history_title.setObjectName('sectionTitle'); right.addWidget(history_title)
         self.history = QListWidget(); self.history.setMinimumHeight(190); self.history.setObjectName('history'); self.history.itemDoubleClicked.connect(self.open_file); self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.history.customContextMenuRequested.connect(self.show_history_menu); right.addWidget(self.history)
-        columns.addLayout(left, 3); columns.addLayout(right, 2)
+        chat = ChatPanel(); chat.setObjectName('chatPanel'); chat_layout = QVBoxLayout(chat); chat_layout.setContentsMargins(14, 12, 14, 14); chat_layout.setSpacing(10)
+        chat_header = QHBoxLayout(); chat_header.setContentsMargins(0, 0, 0, 0)
+        chat_title = QLabel('AI 知识库助手'); chat_title.setObjectName('sectionTitle'); chat_header.addWidget(chat_title); chat_header.addStretch(1)
+        chat_close = QPushButton('×'); chat_close.setObjectName('chatClose'); chat_close.setToolTip('收起 AI 助手'); chat_close.setFixedSize(28, 28); chat_close.clicked.connect(lambda: self.chat_dock.hide()); chat_header.addWidget(chat_close)
+        chat_layout.addLayout(chat_header)
+        self.chat_history = QPlainTextEdit(); self.chat_history.setObjectName('chatHistory'); self.chat_history.setReadOnly(True); self.chat_history.setPlaceholderText('可以问：有哪些编程教程？\n帮我找关于交互设计的视频'); chat_layout.addWidget(self.chat_history, 1)
+        chat_input_row = QHBoxLayout(); chat_input_row.setSpacing(8)
+        self.chat_input = QLineEdit(); self.chat_input.setObjectName('chatInput'); self.chat_input.setPlaceholderText('向视频库提问…'); self.chat_input.returnPressed.connect(self.ask_ai); chat_input_row.addWidget(self.chat_input, 1)
+        self.chat_send = QPushButton('发送'); self.chat_send.setObjectName('chatSend'); self.chat_send.clicked.connect(self.ask_ai); chat_input_row.addWidget(self.chat_send)
+        chat_layout.addLayout(chat_input_row)
+        left_panel = QFrame(); left_panel.setObjectName('sectionPanel'); left_panel_layout = QVBoxLayout(left_panel); left_panel_layout.setContentsMargins(18, 16, 18, 18); left_panel_layout.setSpacing(12); left_panel_layout.addLayout(left)
+        right_panel = QFrame(); right_panel.setObjectName('sectionPanel'); right_panel_layout = QVBoxLayout(right_panel); right_panel_layout.setContentsMargins(18, 16, 18, 18); right_panel_layout.setSpacing(12); right_panel_layout.addLayout(right)
+        columns.addWidget(left_panel, 3); columns.addWidget(right_panel, 2)
         columns.setAlignment(left, Qt.AlignmentFlag.AlignTop)
         columns.setAlignment(right, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(columns); layout.addStretch(1)
+        self.chat_dock = chat
+        self.chat_dock.setObjectName('chatDock')
+        self.chat_dock.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self.chat_dock.resize(360, max(560, self.height()))
+        self.chat_dock.hide()
+        self._chat_initialized = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._chat_initialized:
+            self._chat_initialized = True
+        if self._needs_vault_prompt:
+            self._needs_vault_prompt = False
+            QTimer.singleShot(180, self._prompt_for_knowledge_vault)
+
+    def _prompt_for_knowledge_vault(self):
+        self._show_hint('请选择统一的下载与知识库文件夹。')
+        self.choose_folder()
+
+    def _position_chat_dock(self):
+        if self.chat_dock.isVisible():
+            frame = self.frameGeometry()
+            self.chat_dock.setGeometry(frame.right() + 1, frame.top(), self.chat_dock.width(), frame.height())
+
+    def toggle_chat_dock(self):
+        if self.chat_dock.isVisible():
+            self.chat_dock.hide()
+        else:
+            self.chat_dock.show()
+            QTimer.singleShot(0, self._position_chat_dock)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, 'chat_dock') and self.chat_dock.isVisible():
+            self._position_chat_dock()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'chat_dock') and self.chat_dock.isVisible():
+            self._position_chat_dock()
+
+    def ask_ai(self):
+        question = self.chat_input.text().strip()
+        if not question:
+            return
+        self.chat_input.clear(); self.chat_send.setEnabled(False)
+        self.chat_history.appendPlainText(f'你：{question}\nAI：正在检索视频库…')
+        conversation = list(self.chat_messages[-8:])
+        self.chat_messages.append({'role': 'user', 'content': question})
+        threading.Thread(target=self._chat_worker, args=(question, conversation), daemon=True).start()
+
+    def _chat_worker(self, question: str, conversation: list[dict]):
+        answer = _query_ai_database(question, conversation)
+        try:
+            _save_conversation_memory(question, answer)
+        except OSError:
+            pass
+        self.chat_events.response.emit(answer)
+
+    def _show_chat_response(self, answer: str):
+        self.chat_history.appendPlainText(f'{answer}\n')
+        self.chat_messages.append({'role': 'assistant', 'content': answer})
+        self.chat_send.setEnabled(True)
 
     def _refresh_destination(self):
-        self.destination_path.setText(str(self.output_dir))
-        self.destination_path.setToolTip(str(self.output_dir))
+        self.destination_path.setText(str(OBSIDIAN_VAULT))
+        self.destination_path.setToolTip(f'知识库根目录：{OBSIDIAN_VAULT}\n视频下载目录：{OBSIDIAN_VIDEO_DIR}')
+
+    def choose_knowledge_vault(self):
+        """Backward-compatible alias for older callers and saved shortcuts."""
+        self.choose_folder()
+
+    def _set_unified_location(self, vault: Path) -> None:
+        _set_knowledge_vault(vault)
+        self.output_dir = OBSIDIAN_VIDEO_DIR
+        settings = _settings()
+        settings['knowledge_vault'] = str(OBSIDIAN_VAULT)
+        settings['download_dir'] = str(self.output_dir)
+        try:
+            _save_settings(settings)
+        except OSError:
+            self._show_hint('位置已切换，但无法保存设置；本次运行仍会使用新位置。', error=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._refresh_destination()
+
+    def choose_folder(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            '选择统一的下载与知识库文件夹',
+            str(OBSIDIAN_VAULT if OBSIDIAN_VAULT.exists() else Path.home()),
+        )
+        if not directory:
+            if not OBSIDIAN_VAULT.exists():
+                self._show_hint('尚未选择位置；下载功能仍可使用。', error=True)
+            return
+        vault = Path(directory)
+        if vault.name == '.obsidian':
+            vault = vault.parent
+        self._set_unified_location(vault)
+        self._show_hint(f'已统一位置：{vault}（视频保存在“视频库”文件夹）')
 
     def _show_hint(self, message: str, *, error: bool = False) -> None:
         self.hint.setText(message)
@@ -160,18 +651,6 @@ class MainWindow(QMainWindow):
         self.hint.show()
         self.hint.style().unpolish(self.hint)
         self.hint.style().polish(self.hint)
-
-    def choose_folder(self):
-        selected = QFileDialog.getExistingDirectory(self, '选择视频保存文件夹', str(self.output_dir))
-        if selected:
-            self.output_dir = Path(selected)
-            self._refresh_destination()
-            try:
-                _save_download_dir(self.output_dir)
-            except OSError:
-                self._show_hint('已选择新位置，但系统无法记住它；本次下载仍会使用该位置。', error=True)
-            else:
-                self._show_hint('已保存新的下载位置，之后的下载都会使用这里。')
 
     def show_wechat_authorization(self):
         """Store the owner's Yuanbao credential locally with Windows encryption."""
@@ -348,7 +827,7 @@ class MainWindow(QMainWindow):
             job_id = uuid.uuid4().hex
             self.jobs[job_id] = {'id': job_id, 'url': url, 'title': url, 'stage': '等待下载', 'status': 'waiting', 'progress': 0, 'output_dir': str(self.output_dir)}
             self.job_order.append(job_id); self.pending_job_ids.append(job_id); existing_urls.add(url); added += 1
-        self.url.clear(); self.task_card.show(); self.hint.hide()
+        self.url.clear(); self.task_card.show(); self.empty_queue.hide(); self.hint.hide()
         self._start_pending_jobs()
         if added:
             self._show_hint(f'已加入 {added} 个链接，默认同时下载 {self.max_parallel_downloads} 个。')
@@ -396,12 +875,22 @@ class MainWindow(QMainWindow):
             self._render_jobs(); self._start_pending_jobs(); return
         metadata = result.get('metadata', {}); title = metadata.get('title') or Path(result['video_path']).stem
         compatibility = result.get('compatibility') or {}; compatibility_status = compatibility.get('status')
-        if compatibility_status and compatibility_status not in {'converted', 'already_compatible'}:
+        if compatibility_status in {'conversion_unavailable', 'conversion_failed'}:
             self._show_hint('视频已保存，但兼容性检查没有完成；请确认已安装 ffmpeg。', error=True)
         else:
             job.update({'stage': '下载完成', 'meta': f"已保存 · {_human_size(result.get('size'))}"})
         try:
-            _save_history({'id': uuid.uuid4().hex, 'title': title, 'video_path': result['video_path'], 'size': result.get('size', 0), 'created_at': int(time.time())})
+            _save_history({
+                'id': uuid.uuid4().hex,
+                'title': title,
+                'video_path': result['video_path'],
+                'size': result.get('size', 0),
+                'created_at': int(time.time()),
+                'metadata': result.get('metadata') or {},
+                'subtitle_text': (result.get('subtitle_text') or '')[:12000],
+                'subtitle_path': result.get('subtitle_path'),
+                'knowledge_base': False,
+            })
             self._load_history()
         except OSError:
             self._show_hint('视频已下载，但系统无法保存下载记录。', error=True)
@@ -411,6 +900,7 @@ class MainWindow(QMainWindow):
         self.jobs.pop(job_id, None)
         if not self.jobs:
             self.task_card.hide()
+            self.empty_queue.show()
         self._render_jobs(); self._start_pending_jobs()
 
     def _render_jobs(self):
@@ -475,7 +965,13 @@ class MainWindow(QMainWindow):
     def _load_history(self):
         self.history.clear()
         for entry in _history():
-            item = QListWidgetItem(f"{entry['title']}\n{_human_size(entry.get('size'))}   ·   双击打开")
+            if entry.get('knowledge_base'):
+                status = f"已加入知识库 · {entry.get('category', '其他')}"
+            else:
+                status = '右键加入知识库'
+            if entry.get('id') in self._knowledge_add_ids:
+                status = '正在整理到知识库…'
+            item = QListWidgetItem(f"{entry['title']}\n{_human_size(entry.get('size'))}   ·   双击打开 · {status}")
             item.setData(Qt.ItemDataRole.UserRole, entry); self.history.addItem(item)
 
     def _current_history_entry(self) -> dict | None:
@@ -490,13 +986,85 @@ class MainWindow(QMainWindow):
         self.history.setCurrentItem(item)
         menu = QMenu(self)
         open_folder = menu.addAction('打开视频所在文件夹')
+        add_to_knowledge = menu.addAction('加入知识库')
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        already_added = isinstance(entry, dict) and entry.get('knowledge_base')
+        adding = isinstance(entry, dict) and entry.get('id') in self._knowledge_add_ids
+        if already_added:
+            add_to_knowledge.setText('已加入知识库')
+            add_to_knowledge.setEnabled(False)
+        elif adding:
+            add_to_knowledge.setText('正在整理…')
+            add_to_knowledge.setEnabled(False)
         menu.addSeparator()
         delete_file = menu.addAction('删除记录和视频文件')
+        delete_file.setEnabled(not adding)
         selected = menu.exec(self.history.viewport().mapToGlobal(point))
         if selected == open_folder:
             self.open_history_folder()
+        elif selected == add_to_knowledge:
+            self.add_history_to_knowledge_base()
         elif selected == delete_file:
             self.delete_history_with_file()
+
+    def add_history_to_knowledge_base(self):
+        entry = self._current_history_entry()
+        if not entry or entry.get('knowledge_base') or entry.get('id') in self._knowledge_add_ids:
+            return
+        video_path = Path(entry.get('video_path', ''))
+        if not video_path.is_file():
+            self._show_hint('视频文件不存在，无法加入知识库。', error=True)
+            return
+        self._knowledge_add_ids.add(entry['id'])
+        self._load_history()
+        self._show_hint('正在分析视频内容并整理到知识库…')
+        threading.Thread(target=self._add_history_worker, args=(dict(entry),), daemon=True).start()
+
+    def _add_history_worker(self, entry: dict):
+        try:
+            result = {
+                'success': True,
+                'video_path': entry.get('video_path', ''),
+                'subtitle_path': entry.get('subtitle_path'),
+                'subtitle_text': entry.get('subtitle_text') or '',
+                'metadata': entry.get('metadata') or {'title': entry.get('title', '')},
+            }
+            title = entry.get('title') or Path(result['video_path']).stem
+            result.update(_ai_classify_content(result, title))
+            _organize_video(result, title)
+            _write_obsidian_record('', result, title)
+            self.knowledge_events.finished.emit(entry['id'], True, json.dumps({
+                'video_path': result.get('video_path', entry.get('video_path', '')),
+                'subtitle_path': result.get('subtitle_path'),
+                'category': result.get('category', '其他'),
+                'ai_summary': result.get('ai_summary', ''),
+                'ai_tags': result.get('ai_tags', []),
+            }, ensure_ascii=False))
+        except Exception as exc:
+            self.knowledge_events.finished.emit(entry.get('id', ''), False, str(exc))
+
+    def _knowledge_base_finished(self, entry_id: str, success: bool, detail: str):
+        self._knowledge_add_ids.discard(entry_id)
+        if not success:
+            self._show_hint(f'加入知识库失败：{detail}', error=True)
+            self._load_history()
+            return
+        try:
+            metadata = json.loads(detail)
+        except (TypeError, ValueError):
+            metadata = {}
+        entries = _history()
+        for entry in entries:
+            if entry.get('id') == entry_id:
+                entry.update(metadata)
+                entry['knowledge_base'] = True
+                break
+        try:
+            HISTORY_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError:
+            self._show_hint('视频已整理，但无法更新最近下载状态。', error=True)
+        self._load_history()
+        self._show_hint('已加入知识库：完成分类、摘要和标签整理。')
 
     def open_history_folder(self):
         entry = self._current_history_entry()
@@ -543,7 +1111,7 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet('''#root{background:#0b0d12;color:#f6f8fc;font-family:"Microsoft YaHei";}#inputCard,#taskCard{background:#151a25;border:1px solid #30394b;border-radius:18px;}#linkIcon{font-size:30px;color:#9eb8ff;}#urlInput{background:transparent;border:0;color:#f6f8fc;font-size:16px;padding:8px 0;}#urlInput:focus{outline:none;}#downloadButton{background:#4d7cff;color:white;border:0;border-radius:12px;padding:0 22px;min-height:48px;font-size:16px;font-weight:700;}#downloadButton:hover{background:#638bff;}#destinationLabel{color:#98a2b6;font-size:13px;}#destinationPath{color:#c4cfeb;font-size:13px;}#folderButton,#queueButton,#jobButton{background:#1c2331;border:1px solid #34415b;color:#e6ebf7;border-radius:9px;padding:8px 12px;min-height:34px;font-size:13px;}#folderButton:hover,#queueButton:hover,#jobButton:hover{border-color:#7194ff;background:#263452;}#queueButton:disabled{color:#626c82;background:#1a1e29;border-color:#2c3445;}#removeJobButton{background:#3b202a;border:1px solid #704052;color:#ffd8df;border-radius:9px;padding:8px 12px;min-height:34px;font-size:13px;}#removeJobButton:hover{background:#562a39;border-color:#bb5b73;}#hint,#jobMeta{color:#98a2b6;font-size:13px;}#error{color:#ff8795;font-size:13px;}#sectionTitle{font-size:17px;font-weight:700;color:#f6f8fc;}#queueSummary{font-size:13px;color:#9eb8ff;}#taskScroll,#taskViewport,#taskList{background:#151a25;border:0;}#jobRow{background:#111722;border:1px solid #283244;border-radius:12px;}#jobTitle{font-size:15px;font-weight:600;color:#f6f8fc;}#jobStage{font-size:13px;color:#9eb8ff;}QProgressBar{height:7px;border:0;border-radius:4px;background:#252d3c;}QProgressBar::chunk{background:#4d7cff;border-radius:4px;}#history{background:#151a25;border:1px solid #30394b;border-radius:16px;padding:6px;color:#f6f8fc;outline:none;}#history::item{padding:14px 12px;border-bottom:1px solid #283142;border-radius:8px;}#history::item:selected{background:#22345e;}QMenu{background:#1c2331;color:#f6f8fc;border:1px solid #3b4863;border-radius:8px;padding:6px;}QMenu::item{padding:9px 28px 9px 12px;border-radius:5px;}QMenu::item:selected{background:#2c467d;}QMenu::separator{height:1px;background:#34415b;margin:5px 8px;}''')
     app.setStyleSheet(app.styleSheet() + '''
-        #root { background: #f4f7fb; color: #243147; }
+        #root { background: #eef2f7; color: #243147; }
         #inputCard, #taskCard { background: #ffffff; border-color: #d7e0ee; }
         #linkIcon { color: #6685e8; }
         #urlInput { color: #243147; selection-background-color: #cfdcff; }
@@ -563,14 +1131,17 @@ def main():
         #removeJobButton:hover { background: #ffe2e7; border-color: #df8c9d; }
         #hint, #jobMeta { color: #68778e; }
         #error { color: #b33b52; }
-        #sectionTitle, #jobTitle { color: #243147; }
+        #sectionPanel { background: #ffffff; border: 1px solid #dbe4f0; border-radius: 16px; }
+        #emptyState { color: #91a0b6; font-size: 13px; line-height: 1.6; background: #f8faff; border: 1px dashed #d4deec; border-radius: 11px; }
+        #sectionTitle, #jobTitle { color: #1f2d43; }
         #queueSummary, #jobStage { color: #5873c8; }
         #taskScroll, #taskViewport, #taskList { background: #ffffff; }
         #jobRow { background: #f8faff; border-color: #dbe4f2; }
         QProgressBar { background: #e4ebf5; }
         QProgressBar::chunk { background: #7692ed; }
-        #history { background: #ffffff; border-color: #d7e0ee; color: #243147; }
-        #history::item { border-bottom-color: #e5ebf3; }
+        #history { background: #f8faff; border-color: #e1e8f2; color: #243147; padding: 4px; }
+        #history::item { border-bottom-color: #e5ebf3; padding: 13px 12px; border-radius: 9px; }
+        #history::item:hover { background: #f0f4ff; }
         #history::item:selected { background: #e4ebff; color: #243147; }
         QMenu { background: #ffffff; color: #243147; border-color: #d0dbea; }
         QMenu::item:selected { background: #e6edff; }
@@ -585,6 +1156,23 @@ def main():
         #authorizationError { color: #b84b5d; font-size: 13px; }
         #authorizationInput { min-height: 34px; border: 1px solid #bfcde1; border-radius: 8px; padding: 0 10px; color: #243147; background: #ffffff; }
         #authorizationInput:focus { border: 2px solid #6685e8; }
+        #chatPanel { background: #ffffff; border: 1px solid #d7e0ee; border-radius: 16px; }
+        #chatHistory { background: #f8faff; border: 1px solid #e1e8f3; border-radius: 11px; padding: 12px; color: #31415c; font-size: 13px; line-height: 1.4; }
+        #chatInput { min-height: 36px; background: #ffffff; border: 1px solid #cbd7e8; border-radius: 9px; padding: 0 11px; color: #243147; }
+        #chatInput:focus { border: 2px solid #6685e8; }
+        #chatSend { min-height: 36px; min-width: 58px; background: #6685e8; border: 0; border-radius: 9px; color: #ffffff; font-weight: 600; }
+        #chatSend:hover { background: #5273d8; }
+        #chatSend:disabled { background: #b7c5e7; }
+        #chatToggleButton { background: #eef3ff; border: 1px solid #b9caef; color: #415d9f; border-radius: 9px; padding: 8px 13px; min-height: 34px; font-size: 13px; font-weight: 600; }
+        #chatToggleButton:hover { background: #e0eaff; border-color: #8da9e5; }
+        #chatDock { background: #eef2f7; border: 0; }
+        #chatDock::title { background: #ffffff; color: #1f2d43; padding: 11px 14px; font-size: 15px; font-weight: 700; }
+        #chatClose { background: transparent; border: 0; color: #8290a5; border-radius: 7px; font-size: 20px; font-weight: 500; }
+        #chatClose:hover { background: #edf2fa; color: #31415c; }
+        QPlainTextEdit, QLineEdit { selection-background-color: #cfdcff; }
+        #destinationLabel { font-weight: 600; }
+        #destinationPath { background: #e8eef8; border-radius: 7px; padding: 7px 10px; }
+        #hint { background: #edf3ff; border: 1px solid #d6e2fb; border-radius: 8px; padding: 8px 10px; }
     ''')
     window = MainWindow(); window.show(); sys.exit(app.exec())
 
