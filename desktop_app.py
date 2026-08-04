@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressBar, QMenu,
     QVBoxLayout, QWidget, QFileDialog, QScrollArea, QPlainTextEdit, QSizePolicy,
-    QDialog, QDialogButtonBox, QLineEdit,
+    QDialog, QDialogButtonBox, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox,
+    QFormLayout,
 )
 
 from lib.downloader import download_video
@@ -37,6 +38,30 @@ OBSIDIAN_RECORD_DIR = OBSIDIAN_VIDEO_DIR / '记录'
 INDEX_DB = OBSIDIAN_VIDEO_DIR / '视频索引.sqlite3'
 MEMORY_FILE = OBSIDIAN_VIDEO_DIR / 'AI对话记忆.md'
 
+AI_PRESETS = {
+    'Agnes AI': {
+        'base_url': 'https://apihub.agnes-ai.com/v1/chat/completions',
+        'model': 'agnes-2.5-flash',
+    },
+    'OpenAI': {
+        'base_url': 'https://api.openai.com/v1/chat/completions',
+        'model': 'gpt-4o-mini',
+    },
+    'DeepSeek': {
+        'base_url': 'https://api.deepseek.com/v1/chat/completions',
+        'model': 'deepseek-chat',
+    },
+    'OpenRouter': {
+        'base_url': 'https://openrouter.ai/api/v1/chat/completions',
+        'model': 'openai/gpt-4o-mini',
+    },
+    'Ollama（本地）': {
+        'base_url': 'http://127.0.0.1:11434/v1/chat/completions',
+        'model': 'qwen2.5:7b',
+    },
+    '自定义 OpenAI 兼容': {'base_url': '', 'model': ''},
+}
+
 CONTENT_CATEGORIES = {
     '教程': ('教程', '教学', '课程', '入门', 'how to', 'tutorial', '实操', '方法'),
     '设计': ('设计', 'ui', 'ux', '视觉', '交互', '平面', '字体', '品牌', 'figma'),
@@ -46,6 +71,66 @@ CONTENT_CATEGORIES = {
     '旅行': ('旅行', '旅游', '攻略', '景点', '酒店', '美食', 'vlog'),
     '影视': ('电影', '电视剧', '纪录片', '剪辑', '综艺', '音乐', 'mv'),
 }
+
+
+def _ai_config() -> dict:
+    """Read the current OpenAI-compatible provider configuration."""
+    configured = _settings().get('ai') or {}
+    try:
+        temperature = float(configured.get('temperature', 0.2))
+    except (TypeError, ValueError):
+        temperature = 0.2
+    try:
+        timeout = int(configured.get('timeout', 45))
+    except (TypeError, ValueError):
+        timeout = 45
+    return {
+        'provider': configured.get('provider') or os.environ.get('AGNES_PROVIDER', 'Agnes AI'),
+        'base_url': configured.get('base_url') or os.environ.get(
+            'AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'
+        ),
+        'api_key': configured.get('api_key') or os.environ.get('AGNES_API_KEY', ''),
+        'model': configured.get('model') or os.environ.get('AGNES_MODEL', 'agnes-2.5-flash'),
+        'temperature': max(0.0, min(2.0, temperature)),
+        'timeout': max(5, min(180, timeout)),
+    }
+
+
+def _ai_is_configured(config: dict) -> bool:
+    endpoint = str(config.get('base_url') or '').strip()
+    model = str(config.get('model') or '').strip()
+    local_endpoint = endpoint.startswith(('http://127.0.0.1', 'http://localhost', 'http://[::1]'))
+    return bool(endpoint and model and (config.get('api_key') or local_endpoint))
+
+
+def _ai_chat(messages: list[dict], config: dict | None = None, *, temperature: float | None = None) -> str:
+    """Call any OpenAI-compatible chat-completions endpoint."""
+    config = config or _ai_config()
+    if not _ai_is_configured(config):
+        raise ValueError('尚未完成 AI API 配置。')
+    body = json.dumps({
+        'model': config['model'],
+        'temperature': config['temperature'] if temperature is None else temperature,
+        'messages': messages,
+    }, ensure_ascii=False).encode('utf-8')
+    headers = {'Content-Type': 'application/json'}
+    if config.get('api_key'):
+        headers['Authorization'] = f"Bearer {config['api_key']}"
+    request = urllib.request.Request(config['base_url'], data=body, headers=headers, method='POST')
+    with urllib.request.urlopen(request, timeout=config['timeout']) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+    return str(payload['choices'][0]['message']['content']).strip()
+
+
+def _test_ai_connection(config: dict) -> tuple[bool, str]:
+    try:
+        answer = _ai_chat([
+            {'role': 'system', 'content': '你是连接测试助手，只回复“连接成功”。'},
+            {'role': 'user', 'content': '请测试连接。'},
+        ], config, temperature=0)
+        return True, f'连接成功：{answer[:60]}'
+    except Exception as exc:
+        return False, f'连接失败：{exc}'
 
 
 def _classify_content(result: dict, title: str) -> str:
@@ -65,10 +150,8 @@ def _classify_content(result: dict, title: str) -> str:
 
 def _ai_classify_content(result: dict, title: str) -> dict:
     """Ask the configured OpenAI-compatible endpoint for semantic metadata."""
-    api_key = os.environ.get('AGNES_API_KEY')
-    endpoint = os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions')
-    model = os.environ.get('AGNES_MODEL', 'agnes-2.5-flash')
-    if not api_key:
+    config = _ai_config()
+    if not _ai_is_configured(config):
         return {}
     metadata = result.get('metadata') or {}
     context = (
@@ -83,24 +166,11 @@ def _ai_classify_content(result: dict, title: str) -> dict:
         'tags 返回 3-8 个中文关键词，summary 返回不超过120字的中文摘要。\n\n'
         + context
     )
-    body = json.dumps({
-        'model': model,
-        'temperature': 0.1,
-        'messages': [
+    try:
+        content = _ai_chat([
             {'role': 'system', 'content': '你是个人视频知识库整理助手。'},
             {'role': 'user', 'content': prompt},
-        ],
-    }, ensure_ascii=False).encode('utf-8')
-    request = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        content = payload['choices'][0]['message']['content'].strip()
+        ], config, temperature=0.1)
         content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content).strip()
         try:
             data = json.loads(content)
@@ -179,27 +249,14 @@ def _search_database(question: str, limit: int = 10, fallback: bool = True) -> l
 
 def _expand_query(question: str) -> str:
     """Use the chat model to add search terms without sending vault records."""
-    api_key = os.environ.get('AGNES_API_KEY')
-    if not api_key:
+    config = _ai_config()
+    if not _ai_is_configured(config):
         return question
-    body = json.dumps({
-        'model': os.environ.get('AGNES_QUERY_MODEL', 'agnes-1.5-flash'),
-        'temperature': 0,
-        'messages': [
+    try:
+        expansion = _ai_chat([
             {'role': 'system', 'content': '你是检索词生成器，只输出逗号分隔的中文关键词和同义词，不要解释。'},
             {'role': 'user', 'content': f'为视频知识库检索扩展这个问题：{question}'},
-        ],
-    }, ensure_ascii=False).encode('utf-8')
-    request = urllib.request.Request(
-        os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'),
-        data=body,
-        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        expansion = str(payload['choices'][0]['message']['content']).strip()
+        ], config, temperature=0)
         return f'{question} {expansion[:300]}'
     except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError):
         return question
@@ -207,9 +264,9 @@ def _expand_query(question: str) -> str:
 
 def _query_ai_database(question: str, conversation: list[dict] | None = None) -> str:
     """Answer a question using the Markdown records in the active video vault."""
-    api_key = os.environ.get('AGNES_API_KEY')
-    if not api_key:
-        return '尚未配置 AI API Key。'
+    config = _ai_config()
+    if not _ai_is_configured(config):
+        return '尚未完成 AI API 配置，请点击主界面的“AI 配置”。'
     records = _search_database(question, fallback=False)
     if not records:
         expanded_question = _expand_query(question)
@@ -229,21 +286,8 @@ def _query_ai_database(question: str, conversation: list[dict] | None = None) ->
     messages = [{'role': 'system', 'content': '你是严谨的视频知识库问答助手。'}]
     messages.extend((conversation or [])[-8:])
     messages.append({'role': 'user', 'content': prompt})
-    body = json.dumps({
-        'model': os.environ.get('AGNES_MODEL', 'agnes-2.5-flash'),
-        'temperature': 0.2,
-        'messages': messages,
-    }, ensure_ascii=False).encode('utf-8')
-    request = urllib.request.Request(
-        os.environ.get('AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'),
-        data=body,
-        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-        method='POST',
-    )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        return str(payload['choices'][0]['message']['content']).strip()
+        return _ai_chat(messages, config)
     except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError) as exc:
         return f'AI 查询失败：{exc}'
 
@@ -419,6 +463,10 @@ class ChatEvents(QObject):
     response = Signal(str)
 
 
+class AiConfigEvents(QObject):
+    result = Signal(bool, str)
+
+
 class KnowledgeBaseEvents(QObject):
     finished = Signal(str, bool, str)
 
@@ -503,6 +551,7 @@ class MainWindow(QMainWindow):
         self.destination_path = QLabel(); self.destination_path.setObjectName('destinationPath'); self.destination_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed); destination.addWidget(self.destination_path, 1)
         self.folder_button = QPushButton('选择位置'); self.folder_button.setObjectName('folderButton'); self.folder_button.clicked.connect(self.choose_folder); destination.addWidget(self.folder_button)
         self.authorization_button = QPushButton('视频号授权'); self.authorization_button.setObjectName('authorizationButton'); self.authorization_button.clicked.connect(self.show_wechat_authorization); destination.addWidget(self.authorization_button)
+        self.ai_config_button = QPushButton('AI 配置'); self.ai_config_button.setObjectName('aiConfigButton'); self.ai_config_button.setToolTip('配置 AI 服务商、API 地址、密钥和模型'); self.ai_config_button.clicked.connect(self.show_ai_config); destination.addWidget(self.ai_config_button)
         self.chat_toggle_button = QPushButton('AI'); self.chat_toggle_button.setObjectName('chatToggleButton'); self.chat_toggle_button.setToolTip('展开或收起 AI 知识库助手'); self.chat_toggle_button.setFixedWidth(46); self.chat_toggle_button.clicked.connect(self.toggle_chat_dock); destination.addWidget(self.chat_toggle_button)
         layout.addLayout(destination)
         self._refresh_destination()
@@ -651,6 +700,163 @@ class MainWindow(QMainWindow):
         self.hint.show()
         self.hint.style().unpolish(self.hint)
         self.hint.style().polish(self.hint)
+
+    def show_ai_config(self):
+        """Open the local configuration form for any OpenAI-compatible model."""
+        config = _ai_config()
+        dialog = QDialog(self)
+        dialog.setWindowTitle('AI API 配置')
+        dialog.setMinimumWidth(580)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+
+        heading = QLabel('连接 AI 模型')
+        heading.setObjectName('authorizationTitle')
+        layout.addWidget(heading)
+        help_text = QLabel(
+            '支持 Agnes、OpenAI、DeepSeek、OpenRouter、Ollama 以及其他 OpenAI 兼容接口。\n'
+            '配置只保存在本机，不会随项目上传。'
+        )
+        help_text.setWordWrap(True)
+        help_text.setObjectName('authorizationHelp')
+        layout.addWidget(help_text)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
+        provider = QComboBox()
+        provider.setObjectName('aiProvider')
+        provider.addItems(list(AI_PRESETS))
+        provider_name = str(config.get('provider') or 'Agnes AI')
+        provider.setCurrentText(provider_name if provider_name in AI_PRESETS else '自定义 OpenAI 兼容')
+        form.addRow('服务商预设', provider)
+
+        endpoint = QLineEdit(str(config.get('base_url') or ''))
+        endpoint.setObjectName('aiEndpoint')
+        endpoint.setPlaceholderText('https://api.example.com/v1/chat/completions')
+        endpoint.setAccessibleName('API 地址')
+        form.addRow('API 地址', endpoint)
+
+        api_key = QLineEdit(str(config.get('api_key') or ''))
+        api_key.setObjectName('aiApiKey')
+        api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        api_key.setPlaceholderText('粘贴 API Key（Ollama 本地服务可留空）')
+        api_key.setAccessibleName('API Key')
+        form.addRow('API Key', api_key)
+
+        model = QLineEdit(str(config.get('model') or ''))
+        model.setObjectName('aiModel')
+        model.setPlaceholderText('例如：gpt-4o-mini、deepseek-chat、qwen2.5:7b')
+        model.setAccessibleName('模型名称')
+        form.addRow('模型名称', model)
+
+        temperature = QDoubleSpinBox()
+        temperature.setObjectName('aiTemperature')
+        temperature.setRange(0.0, 2.0)
+        temperature.setSingleStep(0.1)
+        temperature.setDecimals(1)
+        temperature.setValue(float(config.get('temperature', 0.2)))
+        temperature.setSuffix('  （越低越稳定）')
+        form.addRow('创造性', temperature)
+
+        timeout = QSpinBox()
+        timeout.setObjectName('aiTimeout')
+        timeout.setRange(5, 180)
+        timeout.setValue(int(config.get('timeout', 45)))
+        timeout.setSuffix(' 秒')
+        form.addRow('请求超时', timeout)
+        layout.addLayout(form)
+
+        status = QLabel('保存后，右侧 AI 助手会立即使用新配置。')
+        status.setObjectName('aiConfigStatus')
+        status.setWordWrap(True)
+        layout.addWidget(status)
+
+        test_button = QPushButton('测试连接')
+        test_button.setObjectName('aiTestButton')
+        test_button.setAccessibleName('测试 AI 连接')
+        layout.addWidget(test_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save_button.setText('保存配置')
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def apply_preset(name: str):
+            preset = AI_PRESETS.get(name)
+            if not preset or name == '自定义 OpenAI 兼容':
+                return
+            endpoint.setText(preset['base_url'])
+            model.setText(preset['model'])
+
+        provider.currentTextChanged.connect(apply_preset)
+
+        def collect_config() -> dict:
+            return {
+                'provider': provider.currentText(),
+                'base_url': endpoint.text().strip(),
+                'api_key': api_key.text().strip(),
+                'model': model.text().strip(),
+                'temperature': round(temperature.value(), 1),
+                'timeout': timeout.value(),
+            }
+
+        def set_status(message: str, *, error: bool = False):
+            status.setText(message)
+            status.setObjectName('authorizationError' if error else 'aiConfigStatus')
+            status.style().unpolish(status)
+            status.style().polish(status)
+
+        test_events = AiConfigEvents(dialog)
+        dialog._ai_test_events = test_events
+
+        def finish_test(ok: bool, message: str):
+            test_button.setEnabled(True)
+            save_button.setEnabled(True)
+            set_status(message, error=not ok)
+
+        test_events.result.connect(finish_test)
+
+        def test_connection():
+            current = collect_config()
+            if not current['base_url'] or not current['model']:
+                set_status('请先填写 API 地址和模型名称。', error=True)
+                return
+            test_button.setEnabled(False)
+            save_button.setEnabled(False)
+            set_status('正在测试连接，请稍候…')
+            threading.Thread(
+                target=lambda: test_events.result.emit(*_test_ai_connection(current)),
+                daemon=True,
+            ).start()
+
+        def save_config():
+            current = collect_config()
+            if not current['base_url'].startswith(('http://', 'https://')):
+                set_status('API 地址必须以 http:// 或 https:// 开头。', error=True)
+                return
+            if not current['model']:
+                set_status('请填写模型名称。', error=True)
+                return
+            settings = _settings()
+            settings['ai'] = current
+            try:
+                _save_settings(settings)
+            except OSError as exc:
+                set_status(f'保存失败：{exc}', error=True)
+                return
+            if current['api_key']:
+                os.environ['AGNES_API_KEY'] = current['api_key']
+            os.environ['AGNES_API_BASE_URL'] = current['base_url']
+            os.environ['AGNES_MODEL'] = current['model']
+            self._show_hint(f"AI 配置已保存：{current['provider']} / {current['model']}")
+            dialog.accept()
+
+        test_button.clicked.connect(test_connection)
+        buttons.accepted.connect(save_config)
+        dialog.exec()
 
     def show_wechat_authorization(self):
         """Store the owner's Yuanbao credential locally with Windows encryption."""
@@ -1165,6 +1371,14 @@ def main():
         #chatSend:disabled { background: #b7c5e7; }
         #chatToggleButton { background: #eef3ff; border: 1px solid #b9caef; color: #415d9f; border-radius: 9px; padding: 8px 13px; min-height: 34px; font-size: 13px; font-weight: 600; }
         #chatToggleButton:hover { background: #e0eaff; border-color: #8da9e5; }
+        #aiConfigButton { background: #ffffff; border: 1px solid #b9caef; color: #415d9f; border-radius: 9px; padding: 8px 12px; min-height: 34px; font-size: 13px; font-weight: 600; }
+        #aiConfigButton:hover { background: #e8efff; border-color: #8da9e5; }
+        #aiProvider, #aiEndpoint, #aiApiKey, #aiModel, #aiTemperature, #aiTimeout { min-height: 34px; background: #ffffff; border: 1px solid #cbd7e8; border-radius: 8px; padding: 0 10px; color: #243147; }
+        #aiProvider:focus, #aiEndpoint:focus, #aiApiKey:focus, #aiModel:focus, #aiTemperature:focus, #aiTimeout:focus { border: 2px solid #6685e8; }
+        #aiConfigStatus { color: #68778e; font-size: 13px; background: #f7f9fd; border: 1px solid #e1e8f3; border-radius: 8px; padding: 8px 10px; }
+        #aiTestButton { background: #eef4ff; border: 1px solid #b9caef; color: #415d9f; border-radius: 9px; padding: 8px 14px; min-height: 34px; font-size: 13px; }
+        #aiTestButton:hover { background: #e0ebff; border-color: #8da9e5; }
+        #aiTestButton:disabled { background: #edf1f8; border-color: #d7dfeb; color: #9aa8bb; }
         #chatDock { background: #eef2f7; border: 0; }
         #chatDock::title { background: #ffffff; color: #1f2d43; padding: 11px 14px; font-size: 15px; font-weight: 700; }
         #chatClose { background: transparent; border: 0; color: #8290a5; border-radius: 7px; font-size: 20px; font-weight: 500; }
