@@ -1,0 +1,36 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.demielcaitlinxk.videolink'
+version = '0.1.0'
+
+android {
+  namespace 'expo.modules.termuxbridge'
+  sourceSets {
+    main.res.srcDir(layout.buildDirectory.dir('generated/yt-dlp/res'))
+  }
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+def latestYtDlpRes = layout.buildDirectory.dir('generated/yt-dlp/res').get().asFile
+def latestYtDlpFile = new File(latestYtDlpRes, 'raw/ytdlp')
+tasks.register('downloadLatestYtDlp') {
+  outputs.file(latestYtDlpFile)
+  doLast {
+    latestYtDlpFile.parentFile.mkdirs()
+    new URL('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp').withInputStream { input ->
+      latestYtDlpFile.withOutputStream { output -> output << input }
+    }
+  }
+}
+tasks.named('preBuild').configure { dependsOn('downloadLatestYtDlp') }
+
+dependencies {
+  implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+  implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
+}
