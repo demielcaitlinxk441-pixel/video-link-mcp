@@ -46,6 +46,43 @@ scripts\start_desktop_app.bat
 
 桌面下载器不需要 MCP 客户端；它与 MCP 共用相同的下载能力。下载位置与下载记录仅保存在当前电脑。下载结束后，桌面下载器会检查视频是否为 H.264 + AAC + yuv420p 的高兼容 MP4；不是时会自动生成“兼容版”MP4，并完整解码验证后才把它作为默认打开文件。验证通过后，原始不兼容视频会自动删除；转换或验证失败时则会保留原文件。
 
+## Android + iPhone 手机端
+
+项目内置可安装到手机桌面的 PWA 手机端。电脑运行下载服务，手机通过同一局域网远程控制：
+
+```bat
+scripts\start_mobile_web.bat --host 0.0.0.0 --port 8765
+```
+
+在手机浏览器打开电脑终端显示的局域网地址，然后使用“添加到主屏幕/安装应用”。手机端支持提交下载、查看任务、查看最近下载以及 AI 知识库问答；视频和知识库仍保存在电脑上。
+
+### 手机独立版（不依赖电脑）
+
+如果希望手机离线管理自己的下载记录和知识库，请使用项目内的 `mobile-app/`。这是 Android + iPhone 的 Expo/React Native 工程：下载文件、SQLite 索引、AI 配置都在手机本地，只有主动加入知识库时才会生成分类和摘要。
+
+```text
+cd mobile-app
+npm install
+npx expo start
+```
+
+生成 Android APK：
+
+```text
+npx eas login
+npx eas build --platform android --profile preview
+```
+
+生成两个平台的安装包：
+
+```text
+npx eas build --platform all
+```
+
+手机独立版暂时以可下载直链为第一版范围；YouTube、抖音等受保护页面的解析能力不等同于桌面端，需按平台单独适配。iPhone 真机安装需要 Apple Developer 签名。
+
+如果要让其他设备访问，请设置 `MOBILE_WEB_TOKEN` 作为访问密码。未设置密码时只建议在可信家庭局域网中使用。跨网络访问还需要 HTTPS 或安全内网穿透，不要直接把未加密端口暴露到公网。
+
 支持 HTTP MCP 的客户端可在当前电脑启动本机服务：
 
 ```bat
