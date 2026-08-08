@@ -1025,7 +1025,20 @@ class MainWindow(QMainWindow):
         if any(self._is_kuaishou_url(url) for url in urls) and not self._show_kuaishou_notice():
             self._show_hint('已取消快手下载，链接仍保留在输入框中。')
             return
-        existing_urls = {job['url'] for job in self.jobs.values()}
+        # Failed rows should not block a retry of the same link.
+        retry_urls = set(urls)
+        failed_ids = [
+            job_id for job_id, job in self.jobs.items()
+            if job.get('status') == 'failed' and job.get('url') in retry_urls
+        ]
+        for job_id in failed_ids:
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self.pending_job_ids = [item for item in self.pending_job_ids if item != job_id]
+        existing_urls = {
+            job['url'] for job in self.jobs.values()
+            if job.get('status') in {'waiting', 'active'}
+        }
         added = 0
         for url in urls:
             if url in existing_urls:
@@ -1057,7 +1070,10 @@ class MainWindow(QMainWindow):
         def report(data): self.events.progress.emit(job_id, data)
         try:
             output_dir = Path(job['output_dir']); output_dir.mkdir(parents=True, exist_ok=True)
-            result = download_video(job['url'], str(output_dir), progress_callback=report)
+            result = download_video(
+                job['url'], str(output_dir),
+                progress_callback=report,
+            )
         except Exception as exc:
             result = {'success': False, 'error': f'无法保存或下载视频：{exc}'}
         self.events.finished.emit(job_id, result)
