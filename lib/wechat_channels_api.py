@@ -507,12 +507,18 @@ def download_video(
                 header = f.read(8)
             is_valid_mp4 = header[4:8] == b"ftyp" if len(header) >= 8 else False
 
-            if not is_valid_mp4 and downloaded < 1024:
-                # Probably an error response, not a video
-                os.remove(output_path)
+            if not is_valid_mp4:
+                # The CDN can return an HTML login/error page with a 200
+                # status. Never leave that page behind with an .mp4 suffix:
+                # callers would report a successful download, but players
+                # cannot open it.
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
                 return {
                     "success": False,
-                    "error": f"Downloaded file is not a valid video (size={downloaded}, type={content_type})",
+                    "error": f"下载响应不是有效的 MP4 视频（大小={downloaded}，类型={content_type or '未知'}）。请重新授权视频号后重试。",
                     "output_dir": output_dir,
                     "platform": "WeChat Channels",
                 }
