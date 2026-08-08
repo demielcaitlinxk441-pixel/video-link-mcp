@@ -15,9 +15,17 @@ import json
 import subprocess
 import tempfile
 import glob
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
+
+
+_MOBILE_DOUYIN_UA = (
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/130.0 Mobile Safari/537.36'
+)
 
 
 def _hidden_process_kwargs() -> dict:
@@ -45,6 +53,86 @@ def _is_kuaishou(url: str) -> bool:
     return host == 'kuaishou.com' or host.endswith('.kuaishou.com') or host.endswith('.gifshow.com')
 
 
+def _is_douyin(url: str) -> bool:
+    """Check whether a URL belongs to Douyin."""
+    host = urlparse(url).netloc.lower()
+    return host == 'douyin.com' or host.endswith('.douyin.com') or host.endswith('.iesdouyin.com')
+
+
+def _download_douyin_mobile(
+    share_url: str, output_dir: str,
+    report_progress: Callable[[dict], None],
+) -> dict:
+    """Use the same lightweight mobile-share-page flow as the Android app."""
+    page_request = urllib.request.Request(share_url, headers={
+        'User-Agent': _MOBILE_DOUYIN_UA,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    })
+    try:
+        report_progress({'stage': '正在解析抖音分享页'})
+        with urllib.request.urlopen(page_request, timeout=30) as response:
+            page_url = response.geturl()
+            html = response.read().decode('utf-8', errors='replace')
+
+        match = re.search(
+            r'"play_addr"\s*:\s*\{.*?"url_list"\s*:\s*\[\s*"([^"]+)"',
+            html, flags=re.DOTALL,
+        )
+        if not match:
+            return {'success': False, 'error': '抖音移动分享页没有返回视频地址'}
+        video_url = (
+            match.group(1).replace(r'\u002F', '/').replace(r'\u0026', '&')
+            .replace(r'\u003F', '?').replace(r'\u003D', '=').replace(r'\/', '/')
+        )
+        title_match = re.search(r'"desc"\s*:\s*"([^"]*)"', html)
+        title = (title_match.group(1) if title_match else 'douyin_video')
+        title = title.replace(r'\n', ' ').replace(r'\u002F', '/')
+        title = re.sub(r'[<>:"/\\|?*\r\n#]', ' ', title).strip()[:80] or 'douyin_video'
+        video_id_match = re.search(r'/video/(\d+)', page_url)
+        suffix = video_id_match.group(1) if video_id_match else str(int(time.time()))
+        target = os.path.join(output_dir, f'{title} [{suffix}].mp4')
+
+        video_request = urllib.request.Request(video_url, headers={
+            'User-Agent': _MOBILE_DOUYIN_UA,
+            'Referer': page_url or 'https://www.douyin.com/',
+        })
+        report_progress({'stage': '正在下载', 'progress': 0})
+        with urllib.request.urlopen(video_request, timeout=120) as response, \
+                open(target, 'wb') as output:
+            total = int(response.headers.get('Content-Length') or 0)
+            downloaded = 0
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+                report_progress({
+                    'stage': '正在下载',
+                    'progress': round(downloaded * 100 / total, 1) if total else None,
+                    'downloaded_bytes': downloaded,
+                    'total_bytes': total,
+                })
+        if os.path.getsize(target) < 1024:
+            raise OSError('抖音返回的视频文件不完整')
+        return {
+            'success': True,
+            'video_path': target,
+            'size': os.path.getsize(target),
+            'metadata': {'title': title, 'webpage_url': page_url, 'extractor': 'douyin_mobile'},
+            'output_dir': output_dir,
+            'download_method': 'douyin_mobile',
+        }
+    except (OSError, urllib.error.URLError) as exc:
+        if 'target' in locals() and os.path.exists(target):
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        return {'success': False, 'error': f'抖音移动下载失败：{exc}'}
+
+
 def _handle_wechat_channels_download(url: str, output_dir: str, **kwargs) -> dict:
     """
     Fully automated WeChat Channels video download.
@@ -65,6 +153,7 @@ def _handle_wechat_channels_info(url: str, **kwargs) -> dict:
 def _run_playwright_intercept(
     url: str, output_dir: Optional[str], *, allow_interactive_verification: bool = False,
     progress_callback: Optional[Callable[[dict], None]] = None,
+    ffmpeg_path: Optional[str] = None,
 ) -> dict:
     """Run Playwright's synchronous API outside an MCP asyncio loop.
 
@@ -77,10 +166,10 @@ def _run_playwright_intercept(
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='playwright-intercept'
     ) as executor:
-        if allow_interactive_verification or progress_callback:
+        if allow_interactive_verification or progress_callback or ffmpeg_path:
             return executor.submit(
                 intercept_download, url, output_dir, allow_interactive_verification,
-                progress_callback,
+                progress_callback, ffmpeg_path,
             ).result()
         return executor.submit(intercept_download, url, output_dir).result()
 
@@ -190,7 +279,9 @@ def _is_high_compatibility_mp4(media: Optional[dict]) -> bool:
         for stream in video_streams
     ):
         return False
-    return all(stream.get('codec_name') == 'aac' for stream in audio_streams)
+    return bool(audio_streams) and all(
+        stream.get('codec_name') == 'aac' for stream in audio_streams
+    )
 
 
 def _compatible_output_path(source_path: str) -> str:
@@ -267,6 +358,18 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
 
     report_progress({'stage': '正在检查播放兼容性'})
     source_media = _probe_media(source_path, ffprobe_path)
+    source_streams = (source_media or {}).get('streams') or []
+    if not any(stream.get('codec_type') == 'audio' for stream in source_streams):
+        result['success'] = False
+        result['error'] = (
+            '下载到的文件没有音轨。抖音需要读取浏览器 Cookie；'
+            '请先在 Firefox 登录抖音，再完全退出 Firefox 后重新下载。'
+        )
+        result['compatibility'] = {
+            'status': 'missing_audio',
+            'message': result['error'],
+        }
+        return result
     if _is_high_compatibility_mp4(source_media):
         if ffmpeg_path and _decode_check(source_path, ffmpeg_path):
             result['compatibility'] = {'status': 'already_compatible'}
@@ -599,6 +702,19 @@ def download_video(
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
         return result
 
+    # Match the Android app's fast path: the mobile share page exposes a
+    # directly downloadable MP4 and normally needs no browser authorization.
+    if _is_douyin(url):
+        mobile_result = _download_douyin_mobile(url, output_dir, report_progress)
+        if mobile_result.get('success'):
+            mobile_result = _ensure_compatible_video(
+                mobile_result, ffmpeg_path, report_progress
+            )
+            report_progress({
+                'stage': '完成' if mobile_result.get('success') else '下载失败'
+            })
+            return mobile_result
+
     # yt-dlp 目前不支持快手新版分享页。直接进入可见浏览器流程，避免
     # 先等待一次必然失败的解析。快手可能展示“浏览器版本过低”；用户需
     # 在官方页面手动点击“点击重试”，程序只在用户操作后继续获取视频。
@@ -610,7 +726,7 @@ def download_video(
         })
         result = _run_playwright_intercept(
             url, output_dir, allow_interactive_verification=True,
-            progress_callback=report_progress,
+            progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
         )
         result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
@@ -745,7 +861,7 @@ def download_video(
                 report_progress({'stage': '正在使用浏览器解析视频'})
             pw_result = _run_playwright_intercept(
                 url, output_dir, allow_interactive_verification=_is_kuaishou(url),
-                progress_callback=report_progress,
+                progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
             )
         except ImportError:
             return {

@@ -13,6 +13,7 @@ anti-scraping (Douyin, TikTok) without needing cookies or browser lock access.
 
 import os
 import re
+import subprocess
 import tempfile
 import time
 import urllib.request
@@ -101,11 +102,12 @@ def _download_file(
     output_dir: str,
     referer: str = 'https://www.douyin.com/',
     progress_callback: Optional[Callable[[dict], None]] = None,
+    extension: str = '.mp4',
 ) -> dict:
     """Download a video file directly from its URL."""
     os.makedirs(output_dir, exist_ok=True)
     safe_title = _sanitize_filename(title)
-    output_path = os.path.join(output_dir, f'{safe_title}.mp4')
+    output_path = os.path.join(output_dir, f'{safe_title}{extension}')
 
     req = urllib.request.Request(video_url, headers={
         'User-Agent': UA,
@@ -144,11 +146,39 @@ def _download_file(
         return {'success': False, 'error': str(e)}
 
 
+def _merge_audio(video_path: str, audio_path: str, ffmpeg_path: str) -> bool:
+    """Mux an intercepted video-only stream with its separate audio stream."""
+    merged_path = f'{video_path}.merged.mp4'
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg_path, '-y', '-i', video_path, '-i', audio_path,
+                '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy',
+                '-c:a', 'aac', '-movflags', '+faststart', merged_path,
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=600,
+        )
+        if completed.returncode != 0 or not os.path.exists(merged_path):
+            return False
+        os.replace(merged_path, video_path)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        if os.path.exists(merged_path):
+            try:
+                os.remove(merged_path)
+            except OSError:
+                pass
+
+
 def intercept_download(
     url: str,
     output_dir: Optional[str] = None,
     allow_interactive_verification: bool = False,
     progress_callback: Optional[Callable[[dict], None]] = None,
+    ffmpeg_path: Optional[str] = None,
 ) -> dict:
     """
     Use Playwright to intercept video network requests and download directly.
@@ -208,6 +238,7 @@ def intercept_download(
         referer = 'https://www.douyin.com/'
 
     all_video_urls = []
+    all_audio_urls = []
     video_src_urls = []
     page_title = ''
     page_description = ''
@@ -241,13 +272,17 @@ def intercept_download(
             lower = resp_url.lower()
 
             # Broaden interception for XHS: also catch sns-video URLs and API responses
-            catch_patterns = ['.mp4', '.m3u8', 'video', 'aweme/v1/play', '/play/']
+            catch_patterns = [
+                '.mp4', '.m3u8', '.m4a', 'video', 'audio',
+                'aweme/v1/play', '/play/',
+            ]
             if is_xhs:
                 catch_patterns.extend(['sns-video', 'xhscdn', '/api/sns/web/v1/feed'])
             if is_kuaishou:
                 catch_patterns.extend(['kwaicdn', 'kwimgs', 'ksapisrv', 'yximgs', 'gifshow', '/photo/play'])
 
-            if any(ext in lower for ext in catch_patterns):
+            known_media_cdn = is_real_video_url(resp_url)
+            if known_media_cdn or any(ext in lower for ext in catch_patterns):
                 content_type = response.headers.get('content-type', '')
                 content_length = response.headers.get('content-length', '0')
                 try:
@@ -264,7 +299,20 @@ def intercept_download(
                     except Exception:
                         pass
 
-                if 'video' in content_type or '.mp4' in lower or 'play' in lower or 'sns-video' in lower:
+                is_audio = (
+                    'audio' in content_type.lower()
+                    or any(token in lower for token in ('mime_type=audio', 'media_type=audio', '/audio/'))
+                )
+                if is_audio:
+                    entry = {
+                        'url': resp_url,
+                        'content_length': cl,
+                        'content_type': content_type,
+                        'status': response.status,
+                    }
+                    if entry not in all_audio_urls:
+                        all_audio_urls.append(entry)
+                elif 'video' in content_type or '.mp4' in lower or 'play' in lower or 'sns-video' in lower:
                     is_real = is_real_video_url(resp_url)
                     entry = {
                         'url': resp_url,
@@ -275,6 +323,19 @@ def intercept_download(
                     }
                     if entry not in all_video_urls:
                         all_video_urls.append(entry)
+                elif known_media_cdn and cl > 50_000:
+                    # Douyin sometimes labels separate audio as
+                    # application/octet-stream and gives it an opaque CDN URL.
+                    # Treat it as an audio candidate; ffmpeg will reject any
+                    # candidate that does not actually contain an audio track.
+                    entry = {
+                        'url': resp_url,
+                        'content_length': cl,
+                        'content_type': content_type,
+                        'status': response.status,
+                    }
+                    if entry not in all_audio_urls:
+                        all_audio_urls.append(entry)
 
         page.on('response', handle_response)
 
@@ -380,6 +441,7 @@ def intercept_download(
 
     # Sort by content_length descending (largest video first)
     real_urls.sort(key=lambda x: x.get('content_length', 0), reverse=True)
+    all_audio_urls.sort(key=lambda x: x.get('content_length', 0), reverse=True)
 
     if not real_urls:
         # Fallback: try static URLs that have significant size (>500KB)
@@ -416,11 +478,31 @@ def intercept_download(
                 # Too small, skip to next URL
                 continue
 
+            audio_merged = False
+            if is_douyin and all_audio_urls and ffmpeg_path:
+                for audio_number, audio_entry in enumerate(all_audio_urls, start=1):
+                    audio_result = _download_file(
+                        audio_entry['url'], f'{page_title or "video"}-audio-{audio_number}',
+                        output_dir, referer=referer, extension='.m4a',
+                    )
+                    if not audio_result.get('success'):
+                        continue
+                    audio_path = audio_result['video_path']
+                    audio_merged = _merge_audio(result['video_path'], audio_path, ffmpeg_path)
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        pass
+                    if audio_merged:
+                        result['size'] = os.path.getsize(result['video_path'])
+                        break
+
             result['metadata'] = {
                 'title': page_title,
                 'description': page_description,
                 'source_url': url,
                 'video_source_url': vurl,
+                'audio_merged': audio_merged,
             }
             result['method'] = 'playwright_intercept'
             return result
