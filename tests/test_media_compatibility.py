@@ -21,6 +21,12 @@ AV1_MP4 = {
         {'codec_type': 'audio', 'codec_name': 'aac'},
     ],
 }
+VIDEO_ONLY_MP4 = {
+    'format': {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2'},
+    'streams': [
+        {'codec_type': 'video', 'codec_name': 'h264', 'pix_fmt': 'yuv420p'},
+    ],
+}
 
 
 class MediaCompatibilityTests(unittest.TestCase):
@@ -36,6 +42,7 @@ class MediaCompatibilityTests(unittest.TestCase):
     def test_h264_aac_yuv420p_mp4_is_high_compatibility(self):
         self.assertTrue(downloader._is_high_compatibility_mp4(H264_AAC_MP4))
         self.assertFalse(downloader._is_high_compatibility_mp4(AV1_MP4))
+        self.assertFalse(downloader._is_high_compatibility_mp4(VIDEO_ONLY_MP4))
 
     def test_compatible_file_is_verified_without_conversion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -92,6 +99,21 @@ class MediaCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(checked['compatibility']['status'], 'conversion_unavailable')
         self.assertEqual(checked['video_path'], str(source))
+
+    def test_video_without_audio_is_reported_as_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'silent.mp4'
+            source.write_bytes(b'video')
+            result = {'success': True, 'video_path': str(source), 'size': 5}
+            with patch('lib.downloader._find_ffprobe', return_value='ffprobe'), \
+                 patch('lib.downloader._probe_media', return_value=VIDEO_ONLY_MP4):
+                checked = downloader._ensure_compatible_video(
+                    result, 'ffmpeg', lambda _: None
+                )
+
+        self.assertFalse(checked['success'])
+        self.assertEqual(checked['compatibility']['status'], 'missing_audio')
+        self.assertIn('Firefox', checked['error'])
 
     def test_verified_conversion_keeps_both_files_when_source_deletion_is_denied(self):
         with tempfile.TemporaryDirectory() as directory:

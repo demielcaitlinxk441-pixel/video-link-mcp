@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from lib import downloader
-from lib.playwright_downloader import _download_file, is_real_video_url
+from lib.playwright_downloader import _download_file, _merge_audio, is_real_video_url
 
 
 class PlaywrightFallbackTests(unittest.TestCase):
@@ -83,6 +83,28 @@ class PlaywrightFallbackTests(unittest.TestCase):
         self.assertTrue(progress)
         self.assertEqual(progress[-1]['stage'], '正在下载视频')
         self.assertEqual(progress[-1]['progress'], 99)
+
+    def test_separate_audio_is_merged_without_reencoding_video(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            video = f'{output_dir}/video.mp4'
+            audio = f'{output_dir}/audio.m4a'
+            with open(video, 'wb') as stream:
+                stream.write(b'video')
+            with open(audio, 'wb') as stream:
+                stream.write(b'audio')
+
+            def fake_run(command, **_kwargs):
+                self.assertIn('-c:v', command)
+                self.assertEqual(command[command.index('-c:v') + 1], 'copy')
+                with open(f'{video}.merged.mp4', 'wb') as stream:
+                    stream.write(b'merged')
+                return type('Completed', (), {'returncode': 0})()
+
+            with patch('lib.playwright_downloader.subprocess.run', side_effect=fake_run):
+                self.assertTrue(_merge_audio(video, audio, 'ffmpeg'))
+
+            with open(video, 'rb') as stream:
+                self.assertEqual(stream.read(), b'merged')
 
 
 if __name__ == '__main__':
