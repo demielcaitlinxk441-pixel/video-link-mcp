@@ -59,5 +59,14 @@ outputs/
 downloads/
 .playwright/
 
+# Mobile application dependencies and build output
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/android/.gradle/
+mobile-app/android/build/
+mobile-app/android/app/build/
+mobile-app/android/local.properties
+mobile-app/ios/Pods/
+
 # Local Git worktrees
 .worktrees/
