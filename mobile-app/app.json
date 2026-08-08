@@ -16,7 +16,7 @@
         "backgroundColor": "#0E7490"
       },
       "package": "com.demielcaitlinxk.videolink",
-      "versionCode": 33,
+      "versionCode": 35,
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",

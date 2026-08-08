@@ -44,6 +44,7 @@ type ChatMessage = { id: number; role: 'user' | 'assistant'; content: string };
 type TermuxBridgeAPI = {
   isInstalled(): Promise<boolean>;
   runYtDlp(url: string, outputDir?: string, downloadId?: string): Promise<string>;
+  runDouyin(url: string, outputDir?: string): Promise<string>;
   authorizeYuanbao(): Promise<string>;
   runWechatChannels(url: string, cookie: string, outputDir?: string): Promise<string>;
   deleteFile(path: string): Promise<boolean>;
@@ -134,11 +135,6 @@ function titleFromUrl(value: string) {
 function extractHttpUrl(value: string) {
   const match = value.match(/https?:\/\/[^\s]+/i);
   return match ? match[0].replace(/[，。！？、）》】\]}>"']+$/g, '') : '';
-}
-
-function safeFileName(value: string) {
-  const cleaned = value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '').trim();
-  return (cleaned || `video-${Date.now()}`).slice(0, 80);
 }
 
 const EXTERNAL_DOWNLOAD_DIR = 'file:///sdcard/Download/VideoLink/';
@@ -255,9 +251,8 @@ export default function App() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [yuanbaoAuthorized, setYuanbaoAuthorized] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
-  const [downloadMode, setDownloadMode] = useState<'direct' | 'yt-dlp' | 'wechat' | null>(null);
+  const [downloadMode, setDownloadMode] = useState<'yt-dlp' | 'wechat' | null>(null);
   const lastClipboardLinkRef = useRef('');
-  const directDownloadRef = useRef<{ cancelAsync: () => Promise<void> } | null>(null);
   const nativeDownloadIdRef = useRef<string | null>(null);
   const cancelRequestedRef = useRef(false);
   const refresh = useCallback(() => setDownloads(rows()), []);
@@ -283,57 +278,6 @@ export default function App() {
   const completed = useMemo(() => downloads.filter((item) => item.status === 'completed'), [downloads]);
   const categorized = useMemo(() => completed.filter((item) => item.in_knowledge).length, [completed]);
 
-  const download = async (inputUrl = url) => {
-    const link = extractHttpUrl(inputUrl);
-    if (!link) {
-      Alert.alert('链接不完整', '请粘贴以 http:// 或 https:// 开头的视频直链。');
-      return;
-    }
-    if (hasExistingDownload(link)) {
-      Alert.alert('已经下载过', '最近下载里已经有这个链接，无需重复下载。');
-      return;
-    }
-    setBusy(true);
-    setDownloadMode('direct');
-    setDownloadProgress(0);
-    cancelRequestedRef.current = false;
-    try {
-      const title = titleFromUrl(link);
-      const extension = link.match(/\.([a-z0-9]{2,5})(?:\?|$)/i)?.[1] || 'mp4';
-      const dir = `${FileSystem.documentDirectory}downloads/`;
-      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-      const target = `${dir}${safeFileName(title)}-${Date.now()}.${extension}`;
-      const task = FileSystem.createDownloadResumable(link, target, {}, (progress) => {
-        if (progress.totalBytesExpectedToWrite > 0) {
-          setDownloadProgress((progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100);
-        }
-      });
-      directDownloadRef.current = task;
-      const result = await task.downloadAsync();
-      if (!result) throw new Error('下载已取消。');
-      const mimeType = String(result.mimeType || '').toLowerCase();
-      const isHtmlResponse = mimeType.includes('text/html') || mimeType.includes('xhtml');
-      const isLikelyVideo = mimeType.startsWith('video/') || mimeType === 'application/octet-stream' || mimeType === '';
-      if (result.status < 200 || result.status >= 300 || isHtmlResponse || !isLikelyVideo) {
-        await FileSystem.deleteAsync(result.uri, { idempotent: true });
-        throw new Error('这个链接返回的是网页，不是视频直链。请复制视频文件直链，或使用电脑端的视频号授权下载。');
-      }
-      const createdAt = new Date().toISOString();
-      db.runSync('INSERT INTO downloads (title, url, local_uri, status, created_at) VALUES (?, ?, ?, ?, ?)', title, link, result.uri, 'completed', createdAt);
-      setUrl('');
-      refresh();
-      Alert.alert('下载完成', '视频已保存在手机应用目录的“下载”中。');
-    } catch (error) {
-      if (cancelRequestedRef.current) Alert.alert('已取消', '下载已取消，未保存不完整的视频。');
-      else Alert.alert('下载失败', error instanceof Error ? error.message : '无法下载这个链接。');
-    } finally {
-      directDownloadRef.current = null;
-      setDownloadMode(null);
-      setDownloadProgress(null);
-      setBusy(false);
-    }
-  };
-
   const termuxDownload = async (inputUrl = url) => {
     const link = extractHttpUrl(inputUrl);
     if (!link) {
@@ -341,10 +285,11 @@ export default function App() {
       return;
     }
     if (!TermuxBridge) {
-      Alert.alert('仅支持 Android', '内置分享页下载引擎目前只支持 Android，iPhone 请使用视频直链。');
+      Alert.alert('仅支持 Android', '内置平台解析引擎目前只支持 Android，iPhone 请使用电脑端或网页端。');
       return;
     }
     const isWechat = /(?:weixin\.qq\.com\/sph\/|channels\.weixin\.qq\.com\/(?:finder-preview|web\/pages\/feed))/i.test(link);
+    const isDouyin = /(?:v\.douyin\.com|douyin\.com|iesdouyin\.com)/i.test(link);
     if (hasExistingDownload(link)) {
       Alert.alert('已经下载过', '最近下载里已经有这个链接，无需重复下载。');
       return;
@@ -367,6 +312,8 @@ export default function App() {
           return;
         }
         localUri = await TermuxBridge.runWechatChannels(link, cookie, '/sdcard/Download/VideoLink');
+      } else if (isDouyin) {
+        localUri = await TermuxBridge.runDouyin(link, '/sdcard/Download/VideoLink');
       } else {
         const downloadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         nativeDownloadIdRef.current = downloadId;
@@ -399,7 +346,6 @@ export default function App() {
     if (!busy) return;
     cancelRequestedRef.current = true;
     try {
-      if (downloadMode === 'direct' && directDownloadRef.current) await directDownloadRef.current.cancelAsync();
       if (downloadMode === 'yt-dlp' && nativeDownloadIdRef.current && TermuxBridge?.cancelYtDlp) await TermuxBridge.cancelYtDlp(nativeDownloadIdRef.current);
     } catch {
       // The download's finally block will restore the idle state.
@@ -428,9 +374,7 @@ export default function App() {
       Alert.alert('链接不完整', '请先粘贴视频链接。');
       return;
     }
-    const isSharePage = /(?:b23\.tv|bilibili\.com|youtube\.com|youtu\.be|xhslink\.cn|xiaohongshu\.com|weixin\.qq\.com|channels\.weixin\.qq\.com)/i.test(link) && !/\.(?:mp4|m4v|webm|mov|mkv)(?:\?|$)/i.test(link);
-    if (isSharePage) return termuxDownload(link);
-    return download(link);
+    return termuxDownload(link);
   };
 
   useEffect(() => {
@@ -440,7 +384,7 @@ export default function App() {
       Clipboard.getStringAsync().then((clipboardText) => {
         if (cancelled) return;
         const link = extractHttpUrl(clipboardText);
-        const looksLikeVideo = /\.(?:mp4|m4v|webm|mov|mkv)(?:\?|$)/i.test(link) || /(?:b23\.tv|bilibili\.com|youtube\.com|youtu\.be|xhslink\.cn|xiaohongshu\.com|weixin\.qq\.com|channels\.weixin\.qq\.com)/i.test(link);
+        const looksLikeVideo = /\.(?:mp4|m4v|webm|mov|mkv)(?:\?|$)/i.test(link) || /(?:b23\.tv|bilibili\.com|youtube\.com|youtu\.be|xhslink\.cn|xiaohongshu\.com|weixin\.qq\.com|channels\.weixin\.qq\.com|v\.douyin\.com|douyin\.com|iesdouyin\.com)/i.test(link);
         if (!link || !looksLikeVideo || link === lastClipboardLinkRef.current) return;
         lastClipboardLinkRef.current = link;
         Alert.alert('检测到视频链接', '已从手机剪贴板读取到一个视频链接，是否立即下载？', [
@@ -575,9 +519,9 @@ export default function App() {
   );
 }
 
-function HomeScreen({ url, setUrl, busy, download, cancelDownload, downloadProgress, downloadMode, completed, categorized, rows, addToKnowledge, openFile, shareToWechat, deleteVideo }: { url: string; setUrl: (value: string) => void; busy: boolean; download: () => void; cancelDownload: () => void; downloadProgress: number | null; downloadMode: 'direct' | 'yt-dlp' | 'wechat' | null; completed: number; categorized: number; rows: DownloadRow[]; addToKnowledge: (row: DownloadRow) => void; openFile: (row: DownloadRow) => void; shareToWechat: (row: DownloadRow) => void; deleteVideo: (row: DownloadRow) => void }) {
+function HomeScreen({ url, setUrl, busy, download, cancelDownload, downloadProgress, downloadMode, completed, categorized, rows, addToKnowledge, openFile, shareToWechat, deleteVideo }: { url: string; setUrl: (value: string) => void; busy: boolean; download: () => void; cancelDownload: () => void; downloadProgress: number | null; downloadMode: 'yt-dlp' | 'wechat' | null; completed: number; categorized: number; rows: DownloadRow[]; addToKnowledge: (row: DownloadRow) => void; openFile: (row: DownloadRow) => void; shareToWechat: (row: DownloadRow) => void; deleteVideo: (row: DownloadRow) => void }) {
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-    <View style={styles.card}><Text style={[styles.sectionTitle, styles.centerText]}>添加下载</Text><TextInput accessibilityLabel="视频链接" value={url} onChangeText={setUrl} placeholder="粘贴视频链接" placeholderTextColor="#9FB3C8" autoCapitalize="none" autoCorrect={false} style={styles.input} /><Pressable accessibilityRole="button" accessibilityLabel={busy ? '正在下载' : '下载视频'} onPress={() => download()} disabled={busy} style={({ pressed }) => [styles.primary, pressed && styles.pressed, busy && styles.disabled]}>{busy ? <ActivityIndicator color={COLORS.white} /> : <><Ionicons name="arrow-down-circle-outline" size={19} color={COLORS.white} /><Text style={styles.primaryText}>下载</Text></>}</Pressable>{busy ? <View style={styles.progressBox}><View style={styles.progressHeader}><Text style={styles.progressText}>{downloadMode === 'direct' ? '正在下载视频' : downloadMode === 'wechat' ? '正在解析视频号' : '正在解析并下载'}</Text><Text style={styles.progressPercent}>{downloadProgress === null ? '处理中' : `${Math.round(downloadProgress)}%`}</Text></View>{downloadProgress !== null ? <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.max(2, Math.min(100, downloadProgress))}%` }]} /></View> : <ActivityIndicator size="small" color={COLORS.cyan} /> }<Pressable accessibilityRole="button" accessibilityLabel="取消下载" onPress={cancelDownload} style={({ pressed }) => [styles.cancelButton, pressed && styles.pressed]}><Text style={styles.cancelText}>取消下载</Text></Pressable></View> : null}</View>
+    <View style={styles.card}><Text style={[styles.sectionTitle, styles.centerText]}>添加下载</Text><TextInput accessibilityLabel="视频链接" value={url} onChangeText={setUrl} placeholder="粘贴视频链接" placeholderTextColor="#9FB3C8" autoCapitalize="none" autoCorrect={false} style={styles.input} /><Pressable accessibilityRole="button" accessibilityLabel={busy ? '正在下载' : '下载视频'} onPress={() => download()} disabled={busy} style={({ pressed }) => [styles.primary, pressed && styles.pressed, busy && styles.disabled]}>{busy ? <ActivityIndicator color={COLORS.white} /> : <><Ionicons name="arrow-down-circle-outline" size={19} color={COLORS.white} /><Text style={styles.primaryText}>下载</Text></>}</Pressable>{busy ? <View style={styles.progressBox}><View style={styles.progressHeader}><Text style={styles.progressText}>{downloadMode === 'wechat' ? '正在解析视频号' : '正在解析并下载'}</Text><Text style={styles.progressPercent}>{downloadProgress === null ? '处理中' : `${Math.round(downloadProgress)}%`}</Text></View>{downloadProgress !== null ? <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.max(2, Math.min(100, downloadProgress))}%` }]} /></View> : <ActivityIndicator size="small" color={COLORS.cyan} /> }<Pressable accessibilityRole="button" accessibilityLabel="取消下载" onPress={cancelDownload} style={({ pressed }) => [styles.cancelButton, pressed && styles.pressed]}><Text style={styles.cancelText}>取消下载</Text></Pressable></View> : null}</View>
     <View style={styles.stats}><Stat value={String(completed)} label="已下载" icon="checkmark-circle-outline" /><Stat value={String(categorized)} label="已入库" icon="library-outline" /><Stat value="手机" label="本地保存" icon="phone-portrait-outline" /></View>
     <RecentList rows={rows} addToKnowledge={addToKnowledge} openFile={openFile} shareToWechat={shareToWechat} deleteVideo={deleteVideo} />
   </ScrollView>;
