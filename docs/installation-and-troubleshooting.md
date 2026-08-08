@@ -1,170 +1,112 @@
 # 安装与排错指南
 
-本指南面向从公开 GitHub 仓库安装 Video Link Analyzer 的使用者。README 适合快速开始；遇到安装、更新或运行问题时再查看本页。
+本文覆盖桌面 MCP 服务、Windows 下载器和 `mobile-app/` 手机工程。先完成对应环境，再运行自检。
 
-## 安装前准备
+## Windows 桌面版
 
+安装前准备：
+
+- Python 3.10–3.13
 - Git
-- Python 3.10 至 3.13
-- ffmpeg（视频合并、自动兼容 MP4 转换和语音转文字需要）
+- FFmpeg
 
-不要复制其他电脑的 `venv/`、浏览器 Cookie、`.env` 或已下载视频。每台电脑都应重新安装，并只保存自己的本机凭据。
-
-## 从 GitHub 安装
-
-```bash
-git clone https://github.com/demielcaitlinxk441-pixel/video-link-mcp.git
-cd video-link-mcp
-```
-
-Windows：
+运行：
 
 ```bat
 setup.bat
 ```
 
-macOS / Linux：
+脚本会创建 `venv/`、安装核心依赖、安装 Chromium、检查 FFmpeg、运行 `scripts/verify.py` 和 `diagnose.py`。路径过深时会把运行时放到 `%LOCALAPPDATA%\VideoLinkAnalyzer\runtime`。
 
-```bash
-chmod +x setup.sh
-./setup.sh
-```
-
-需要在无字幕视频上使用语音转文字时，运行安装脚本时附加 `--with-stt`。安装脚本会创建本机虚拟环境、安装 Chromium、执行自检并打印 stdio MCP 配置。Windows 电脑若未安装 Python 或 ffmpeg，`setup.bat` 会使用 winget 自动安装它们；需保持联网，并使用带 Windows App Installer 的 Windows 10/11。
-
-如果项目所在文件夹层级很深，Windows 的路径长度限制可能影响桌面窗口依赖的安装。`setup.bat` 会自动改用当前用户本机的短路径运行环境，无须移动项目；完成后仍按正常方式使用桌面快捷方式和 MCP 配置即可。
-
-## Windows 桌面下载器
-
-Windows 上完成 `setup.bat` 后，安装脚本会自动在桌面创建 **Video Link Analyzer** 快捷方式。双击它即可打开独立下载窗口：粘贴视频链接、选择保存文件夹，然后点击“开始下载”。
-
-若桌面快捷方式没有出现，可在项目目录双击运行：
+手动检查：
 
 ```bat
-scripts\start_desktop_app.bat
+venv\Scripts\python.exe scripts\verify.py
+venv\Scripts\python.exe diagnose.py
+venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-桌面下载器不需要 MCP 客户端；它与 MCP 共用相同的下载能力。下载位置与下载记录仅保存在当前电脑。下载结束后，桌面下载器会检查视频是否为 H.264 + AAC + yuv420p 的高兼容 MP4；不是时会自动生成“兼容版”MP4，并完整解码验证后才把它作为默认打开文件。验证通过后，原始不兼容视频会自动删除；转换或验证失败时则会保留原文件。
+核心依赖和 Chromium 必须通过。FFmpeg 需要能被下载器找到；如果 FFmpeg 已通过 winget 安装但诊断显示未找到，请把 FFmpeg 的 `bin` 目录加入系统 PATH，重新打开终端后再检查。
 
-## Android + iPhone 手机端
+## MCP 配置
 
-项目内置可安装到手机桌面的 PWA 手机端。电脑运行下载服务，手机通过同一局域网远程控制：
+使用 `mcp_config_example.json` 生成客户端配置。配置中的 Python 和 `server.py` 必须指向当前电脑的绝对路径，不能复制其他电脑的 `venv/`。
 
-```bat
-scripts\start_mobile_web.bat --host 0.0.0.0 --port 8765
-```
-
-在手机浏览器打开电脑终端显示的局域网地址，然后使用“添加到主屏幕/安装应用”。手机端支持提交下载、查看任务、查看最近下载以及 AI 知识库问答；视频和知识库仍保存在电脑上。
-
-### 手机独立版（不依赖电脑）
-
-如果希望手机离线管理自己的下载记录和知识库，请使用项目内的 `mobile-app/`。这是 Android + iPhone 的 Expo/React Native 工程：下载文件、SQLite 索引、AI 配置都在手机本地，只有主动加入知识库时才会生成分类和摘要。
-
-```text
-cd mobile-app
-npm install
-npx expo start
-```
-
-生成 Android APK：
-
-```text
-npx eas login
-npx eas build --platform android --profile preview
-```
-
-生成两个平台的安装包：
-
-```text
-npx eas build --platform all
-```
-
-手机独立版暂时以可下载直链为第一版范围；YouTube、抖音等受保护页面的解析能力不等同于桌面端，需按平台单独适配。iPhone 真机安装需要 Apple Developer 签名。
-
-如果要让其他设备访问，请设置 `MOBILE_WEB_TOKEN` 作为访问密码。未设置密码时只建议在可信家庭局域网中使用。跨网络访问还需要 HTTPS 或安全内网穿透，不要直接把未加密端口暴露到公网。
-
-支持 HTTP MCP 的客户端可在当前电脑启动本机服务：
+HTTP 模式运行：
 
 ```bat
 scripts\start_http_mcp.bat
 ```
 
-Windows 以外的系统可运行：
+默认地址为 `http://127.0.0.1:8000/mcp`；端口冲突时传入其他端口。
 
-```bash
-venv/bin/python server.py --transport http
+## 抖音下载
+
+当前桌面版优先读取移动分享页里的完整 MP4 地址，通常比浏览器拦截更快，也不依赖 Cookie。若页面改版导致直连失败，程序会继续尝试 yt-dlp 或备用解析。
+
+若平台要求 Cookie，可在 MCP 调用中传入：
+
+```json
+{
+  "cookies_from_browser": "firefox"
+}
 ```
 
-随后在兼容的客户端中使用 `http://127.0.0.1:8000/mcp`。该地址仅供当前电脑访问。
+也可以传入 Netscape 格式的 `cookies.txt`。新版 Chrome/Edge 可能因 DPAPI 应用绑定加密而无法被 yt-dlp 解密，这不是项目 Cookie 参数写错。
 
-## 更新项目
+## 手机原生工程
 
-在项目目录中执行：
+`mobile-app/` 是独立的 Expo / React Native 工程，不是桌面服务的启动脚本。
 
 ```bash
-git pull
+cd mobile-app
+npm install
+npx expo start
 ```
 
-然后重新运行对应系统的安装脚本和 `diagnose.py`，让依赖与浏览器组件同步到新版本。
+环境要求：
+
+- Node.js 22.13+
+- Expo CLI / EAS CLI
+- 本地 Android 构建：JDK 17+、`JAVA_HOME`、Android SDK 和 Gradle
+- iPhone 真机：Apple Developer 签名
+
+如果只使用 EAS 云构建，不需要本机 Gradle，但仍需要 Node.js。Android SDK 路径应写在本机 `android/local.properties` 中；该文件不提交到仓库。
+
+TypeScript 检查报错时，先确认 Node.js 已加入 PATH，并在 `mobile-app/` 目录运行 `npm install`。如果错误来自项目自带 `android-sdk/` 中的第三方 JavaScript 文件，应将该 SDK 目录排除在 tsconfig 检查范围之外，不要把它误判为 `App.tsx` 业务代码错误。
 
 ## 常见问题
 
-### Python 版本不符合要求
+### Python 找不到
 
-安装 Python 3.10 至 3.13，并确认 Windows 的 `python` 或 macOS/Linux 的 `python3` 已加入系统 PATH，然后重新运行安装脚本。
+重新运行 `setup.bat`。脚本支持 Python 3.10–3.13；如果系统没有合适版本，会尝试通过 winget 安装 Python 3.13。
 
-### 找不到 ffmpeg
-
-Windows 可运行：
-
-```bat
-winget install ffmpeg
-```
-
-macOS 可运行：
-
-```bash
-brew install ffmpeg
-```
-
-Ubuntu / Debian 可运行：
-
-```bash
-sudo apt install ffmpeg
-```
-
-安装后执行 `diagnose.py` 确认环境状态。
-
-### Chromium 未安装或 Playwright 下载失败
-
-Windows：
+### Playwright Chromium 缺失
 
 ```bat
 venv\Scripts\python.exe -m playwright install chromium
 ```
 
-macOS / Linux：
+### FFmpeg 缺失
 
-```bash
-venv/bin/python -m playwright install chromium
+```bat
+winget install --id Gyan.FFmpeg.Shared --exact
 ```
 
-### 缺少语音转文字功能
+安装后重新打开终端，并确认 `ffmpeg -version` 能运行。
 
-重新运行安装脚本并附加 `--with-stt`，或在现有虚拟环境安装 `requirements-stt.txt`。
+### 语音转文字不可用
 
-### MCP 客户端没有显示工具
+语音转文字是可选功能：
 
-确认 MCP 配置中的 Python 与 `server.py` 路径属于当前电脑，然后重启 MCP 客户端。使用 HTTP MCP 时，先启动本机 HTTP 服务，并确认客户端填写的端口与启动命令一致。
-
-## 本机凭据与视频号隐私
-
-浏览器 Cookie、`cookies.txt`、`.env`、元宝 Cookie、下载文件和 `venv` 都只能保留在本机，绝不能提交到 GitHub 或发送给他人。
-
-视频号在未配置元宝 Cookie 时，会默认将分享链接发送至公共 Worker 解析服务。若不希望使用该服务，请在 MCP 客户端的环境变量中设置：
-
-```text
-WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=false
+```bat
+setup.bat --with-stt
 ```
 
-也可以配置自己的 `WECHAT_CHANNELS_WORKER_URL`，或使用本机的 `WECHAT_CHANNELS_YUANBAO_COOKIE` 直接解析。
+### 下载失败或没有音频
+
+先确认使用的是最新代码，删除失败任务后重新提交链接。抖音下载应优先走移动分享页直连；若仍失败，检查页面是否需要登录 Cookie，并确认 FFmpeg 可用。
+
+## 隐私提醒
+
+不要把 Cookie、API Key、下载视频、日志或本机配置上传到 GitHub。公共 Worker、代理和第三方 AI 服务可能接收你主动发送的链接或文本，请按需关闭或替换。
