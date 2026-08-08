@@ -50,6 +50,55 @@ chmod +x setup.sh
 
 ---
 
+## Android + iPhone 手机端
+
+项目现在提供一个可安装到手机桌面的跨平台 PWA。电脑继续负责下载视频和保存知识库，手机端负责远程提交下载、查看任务、查看最近下载和询问 AI。
+
+在电脑上启动手机端服务：
+
+```bat
+scripts\start_mobile_web.bat --host 0.0.0.0 --port 8765
+```
+
+确保手机和电脑连接同一 Wi-Fi，然后在手机浏览器打开电脑显示的局域网地址（例如 `http://192.168.1.20:8765`）。在浏览器菜单中选择“添加到主屏幕/安装应用”，即可像 App 一样从手机桌面打开。首次使用时，手机端会显示电脑端当前的 AI 配置和知识库状态。
+
+局域网使用建议设置访问密码：
+
+```powershell
+$env:MOBILE_WEB_TOKEN = "自定义访问密码"
+scripts\start_mobile_web.bat --host 0.0.0.0 --port 8765
+```
+
+当前手机端是安装式 PWA，不需要额外的 Android 或 iOS 原生开发环境；如需发布到应用商店，再将同一界面封装为原生安装包。
+
+### 手机独立版（Android + iPhone）
+
+项目同时提供 `mobile-app/` 原生跨平台工程。它不依赖电脑后台：视频直链下载到手机本地、下载记录和知识库索引使用手机 SQLite，AI 通过手机中配置的 OpenAI 兼容接口直连。下载后仍由用户在“最近下载”中主动点击“加入知识库”，不会自动上传视频文件。
+
+进入 `mobile-app` 后安装依赖并启动：
+
+```text
+npm install
+npx expo start
+```
+
+生成可安装 Android APK：
+
+```text
+npx eas login
+npx eas build --platform android --profile preview
+```
+
+生成 Android + iPhone 构建：
+
+```text
+npx eas build --platform all
+```
+
+Expo SDK 57 要求 Node.js 22.13+。Android 预览构建会生成 APK；iPhone 真机安装需要 Apple Developer 签名。手机端第一版优先支持可直接下载的 MP4/WebM 等直链，受保护的短视频页面仍需要后续平台适配。
+
+---
+
 ## 功能概览
 
 | 工具 | 功能 | 说明 |
