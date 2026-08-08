@@ -66,6 +66,61 @@ class TermuxBridgeModule : Module() {
     }
   }
 
+  private fun douyinDownload(shareUrl: String, outputDir: String): String {
+    val page = (URL(shareUrl).openConnection() as HttpURLConnection).apply {
+      instanceFollowRedirects = true
+      connectTimeout = 20000
+      readTimeout = 30000
+      setRequestProperty("Accept", "text/html,application/xhtml+xml")
+      setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+      setRequestProperty("User-Agent", desktopUserAgent)
+    }
+    val status = page.responseCode
+    val html = if (status in 200..299) page.inputStream.bufferedReader().use { it.readText() } else ""
+    val pageUrl = page.url?.toString().orEmpty()
+    page.disconnect()
+    if (html.isBlank()) throw Exception("抖音分享页无法打开（HTTP $status）")
+    val encodedVideoUrl = Regex("\\\"play_addr\\\"\\s*:\\s*\\{.*?\\\"url_list\\\"\\s*:\\s*\\[\\s*\\\"([^\\\"]+)\\\"", setOf(RegexOption.DOT_MATCHES_ALL)).find(html)?.groupValues?.get(1)
+      ?: throw Exception("抖音分享页没有返回视频地址，请在抖音中重新复制分享链接")
+    val videoUrl = encodedVideoUrl
+      .replace("\\u002F", "/")
+      .replace("\\u0026", "&")
+      .replace("\\u003F", "?")
+      .replace("\\u003D", "=")
+      .replace("\\/", "/")
+    val title = Regex("\\\"desc\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"").find(html)?.groupValues?.get(1)
+      ?.replace("\\n", " ")
+      ?.replace("\\u002F", "/")
+      ?.trim()
+      .orEmpty()
+      .ifBlank { "douyin_video" }
+      .replace(Regex("[<>:\"/\\\\|?*\\r\\n#]"), " ")
+      .trim()
+      .take(80)
+    val directory = File(outputDir).apply { mkdirs() }
+    val target = File(directory, "$title-${System.currentTimeMillis()}.mp4")
+    val download = (URL(videoUrl).openConnection() as HttpURLConnection).apply {
+      instanceFollowRedirects = true
+      connectTimeout = 30000
+      readTimeout = 120000
+      setRequestProperty("Referer", pageUrl.ifBlank { "https://www.douyin.com/" })
+      setRequestProperty("User-Agent", desktopUserAgent)
+    }
+    try {
+      val downloadStatus = download.responseCode
+      val contentType = download.contentType.orEmpty().lowercase()
+      if (downloadStatus !in 200..299 || contentType.contains("text/html")) throw Exception("抖音返回的不是视频文件（HTTP $downloadStatus）")
+      val bytes = download.inputStream.use { input -> target.outputStream().use { output -> input.copyTo(output, 65536) } }
+      if (bytes < 1024) throw Exception("抖音视频文件不完整")
+    } catch (error: Throwable) {
+      target.delete()
+      throw error
+    } finally {
+      download.disconnect()
+    }
+    return target.absolutePath
+  }
+
   private fun httpJson(url: String, body: String, headers: Map<String, String>): JSONObject {
     val connection = (URL(url).openConnection() as HttpURLConnection).apply {
       requestMethod = "POST"
@@ -204,6 +259,10 @@ class TermuxBridgeModule : Module() {
     AsyncFunction("runWechatChannels") { url: String, cookie: String, outputDir: String? ->
       if (cookie.isBlank()) throw Exception("请先完成元宝授权")
       wechatChannelsDownload(url, cookie, outputDir?.takeIf { it.isNotBlank() } ?: "/sdcard/Download/VideoLink")
+    }
+
+    AsyncFunction("runDouyin") { url: String, outputDir: String? ->
+      douyinDownload(url, outputDir?.takeIf { it.isNotBlank() } ?: "/sdcard/Download/VideoLink")
     }
 
     AsyncFunction("deleteFile") { path: String ->
