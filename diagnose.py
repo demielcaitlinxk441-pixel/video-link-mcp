@@ -5,8 +5,9 @@ import argparse
 import importlib.util
 import json
 import os
-import shutil
 import sys
+
+from lib.downloader import find_ffmpeg
 
 
 REQUIRED_PACKAGES = ('mcp', 'yt_dlp', 'playwright', 'PySide6')
@@ -35,11 +36,13 @@ def collect_diagnostics() -> dict:
     supported_python = (3, 10) <= sys.version_info[:2] <= (3, 13)
 
     playwright_browser = _chromium_is_installed()
+    ffmpeg_path = find_ffmpeg()
     return {
         'python': sys.version.split()[0],
         'supported_python': supported_python,
         'core_dependencies': dependencies,
-        'ffmpeg': shutil.which('ffmpeg') is not None,
+        'ffmpeg': ffmpeg_path is not None,
+        'ffmpeg_path': ffmpeg_path,
         'playwright_browser': playwright_browser,
         'speech_to_text': importlib.util.find_spec('faster_whisper') is not None,
         'core_ready': supported_python and all(dependencies.values()) and playwright_browser,
@@ -57,7 +60,8 @@ def main() -> int:
     else:
         print(f"Python: {result['python']} ({'supported' if result['supported_python'] else 'unsupported'})")
         print(f"Core dependencies: {result['core_dependencies']}")
-        print(f"ffmpeg: {'found' if result['ffmpeg'] else 'not found'}")
+        ffmpeg_status = result['ffmpeg_path'] or 'not found'
+        print(f"ffmpeg: {ffmpeg_status}")
         print(f"Playwright Chromium: {'found' if result['playwright_browser'] else 'not found'}")
         print(f"Speech-to-text: {'installed' if result['speech_to_text'] else 'not installed'}")
         print(f"Core ready: {'yes' if result['core_ready'] else 'no'}")

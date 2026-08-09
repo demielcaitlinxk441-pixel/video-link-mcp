@@ -9,9 +9,16 @@ class DiagnoseTests(unittest.TestCase):
         result = diagnose.collect_diagnostics()
         for name in (
             'python', 'supported_python', 'core_dependencies', 'ffmpeg',
-            'playwright_browser', 'speech_to_text', 'core_ready',
+            'ffmpeg_path', 'playwright_browser', 'speech_to_text', 'core_ready',
         ):
             self.assertIn(name, result)
+
+    @patch('diagnose.find_ffmpeg', return_value=r'C:\\ffmpeg\\bin\\ffmpeg.exe')
+    def test_ffmpeg_uses_the_downloader_locator(self, _):
+        result = diagnose.collect_diagnostics()
+
+        self.assertTrue(result['ffmpeg'])
+        self.assertEqual(result['ffmpeg_path'], r'C:\\ffmpeg\\bin\\ffmpeg.exe')
 
     @patch('diagnose.importlib.util.find_spec', return_value=None)
     def test_core_ready_is_false_when_a_required_package_is_missing(self, _):
