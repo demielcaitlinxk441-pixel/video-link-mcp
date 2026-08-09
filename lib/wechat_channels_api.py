@@ -11,12 +11,11 @@ Two modes supported:
      b) WeChat Channels API to get the video URL + metadata
    - This is the recommended mode — no dependency on any third-party service.
 
-2. **Worker API mode** (fallback, out-of-box):
-   - If no Yuanbao cookie is provided, falls back to the public Cloudflare
-     Worker API (sph.litao.workers.dev) which does the same two-step process
-     server-side using its own cookie.
-   - Also supports a custom Worker URL via WECHAT_CHANNELS_WORKER_URL env var,
-     so users can self-deploy their own Worker instance.
+2. **Worker API mode** (explicit opt-in):
+   - Configure a custom Worker URL via WECHAT_CHANNELS_WORKER_URL, or enable
+     the public Cloudflare Worker with WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER.
+   - The Worker performs the same two-step process server-side using its own
+     cookie, so the public endpoint remains disabled by default.
 
 Reference: https://github.com/ltaoo/wx_channels_download
 """
@@ -298,8 +297,8 @@ def is_custom_worker_configured() -> bool:
 
 
 def is_public_worker_allowed() -> bool:
-    """Return whether public Worker use is enabled (enabled by default)."""
-    value = os.environ.get("WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER", "true")
+    """Return whether the user explicitly enabled the public Worker."""
+    value = os.environ.get("WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER", "false")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 

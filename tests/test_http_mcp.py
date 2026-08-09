@@ -1,3 +1,5 @@
+import contextlib
+import io
 from unittest.mock import patch
 import unittest
 
@@ -12,8 +14,9 @@ class HttpMcpTests(unittest.TestCase):
         self.assertEqual(config.port, 8000)
 
     def test_rejects_port_outside_valid_tcp_range(self):
-        with self.assertRaises(SystemExit):
-            server.parse_runtime_config(['--transport', 'http', '--port', '70000'])
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                server.parse_runtime_config(['--transport', 'http', '--port', '70000'])
 
     def test_streamable_http_app_exposes_mcp_route(self):
         app = server.mcp.streamable_http_app()

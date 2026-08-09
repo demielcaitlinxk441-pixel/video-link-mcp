@@ -14,7 +14,14 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_env_example_contains_names_but_no_secret_values(self):
         lines = (ROOT / '.env.example').read_text(encoding='utf-8').splitlines()
         self.assertIn('WECHAT_CHANNELS_YUANBAO_COOKIE=', lines)
-        self.assertIn('WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true', lines)
+        self.assertIn('WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=false', lines)
+
+    def test_only_the_active_desktop_icon_is_tracked(self):
+        assets = ROOT / 'assets'
+
+        self.assertTrue((assets / 'video-download-round.ico').is_file())
+        self.assertFalse((assets / 'video-download.ico').exists())
+        self.assertFalse((assets / 'app-icon.ico').exists())
 
     def test_readme_documents_private_installation_and_worker_opt_in(self):
         readme = (ROOT / 'README.md').read_text(encoding='utf-8')

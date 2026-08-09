@@ -34,6 +34,8 @@ Windows 运行 `setup.bat`；macOS/Linux 运行 `chmod +x setup.sh && ./setup.sh
 
 微信视频号公共 Worker 默认关闭；如需启用，请明确设置 `WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true`，也可以改用自己的 Worker 或本地 Cookie。
 
+> 公共 Worker 是第三方服务，启用后视频号分享链接会发送给该服务进行解析。对隐私有要求时请使用本地 Cookie 或自己部署的 Worker。
+
 ## 手机版安装包
 
 仓库不再放置手机版源码、Android SDK、构建缓存或旧安装包，只通过 GitHub Releases 发布最新 Android APK。打开仓库的 **Releases**，进入最新版本，在 **Assets** 下载 `video-link-v37.apk`。

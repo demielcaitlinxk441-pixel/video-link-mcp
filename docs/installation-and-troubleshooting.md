@@ -20,7 +20,7 @@ venv\Scripts\python.exe diagnose.py
 venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-FFmpeg 即使已经安装，若未加入系统 PATH，诊断脚本仍可能提示找不到；下载器会在常见安装目录中继续查找。若要让命令行也能直接使用，请把 FFmpeg 的 `bin` 目录加入 PATH，并重新打开终端。
+诊断脚本与下载器使用同一套 FFmpeg 查找规则：先检查系统 PATH，再检查 Windows 常见安装目录。诊断结果会显示实际使用的程序路径。若要让其他命令行工具也能直接使用 FFmpeg，请把它的 `bin` 目录加入 PATH，并重新打开终端。
 
 ## 抖音下载没有声音
 

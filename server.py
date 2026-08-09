@@ -9,7 +9,7 @@ Standalone MCP (Model Context Protocol) server that provides:
   3. Speech-to-text transcription fallback (via Whisper, optional)
   4. One-stop video analysis pipeline
   5. WeChat Channels (视频号) download via direct API calls (recommended)
-     or Cloudflare Worker API (fallback)
+     or an explicitly enabled Cloudflare Worker API
 
 Connect from WorkBuddy, Codex, or any MCP-compatible client.
 
@@ -153,8 +153,8 @@ def get_video_info(
         yuanbao_cookie: Yuanbao web cookie for WeChat Channels direct API
             mode (eliminates third-party dependency). Get it from
             yuanbao.tencent.com after logging in. If not provided, checks
-            WECHAT_CHANNELS_YUANBAO_COOKIE env var, then falls back to
-            the public Worker API.
+            WECHAT_CHANNELS_YUANBAO_COOKIE. A Worker is used only when a
+            custom endpoint or public Worker opt-in is configured.
 
     Returns:
         JSON string with video metadata and available subtitle info.
@@ -191,9 +191,9 @@ def download_video(
       1. Direct API (recommended): pass yuanbao_cookie or set
          WECHAT_CHANNELS_YUANBAO_COOKIE env var. Calls Tencent APIs
          directly, no third-party dependency.
-      2. Worker API (fallback): if no cookie is provided, uses the public
-         Cloudflare Worker at sph.litao.workers.dev. Also supports a
-         custom Worker via WECHAT_CHANNELS_WORKER_URL env var.
+      2. Worker API (opt-in): configure a custom Worker through
+         WECHAT_CHANNELS_WORKER_URL, or explicitly enable the public Worker
+         with WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true.
 
     Args:
         url: Video URL.
