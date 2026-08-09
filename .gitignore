@@ -34,6 +34,9 @@ desktop.ini
 *.wav
 *.vtt
 *.srt
+*.apk
+*.aab
+dist/
 
 # Cookie files
 cookies.txt
