@@ -1,9 +1,0 @@
-node_modules/
-.expo/
-dist/
-*.jks
-*.keystore
-*.p8
-*.p12
-*.mobileprovision
-*.cer
