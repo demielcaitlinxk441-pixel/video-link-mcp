@@ -32,6 +32,8 @@ Windows 运行 `setup.bat`；macOS/Linux 运行 `chmod +x setup.sh && ./setup.sh
 }
 ```
 
+微信视频号公共 Worker 默认关闭；如需启用，请明确设置 `WECHAT_CHANNELS_ALLOW_PUBLIC_WORKER=true`，也可以改用自己的 Worker 或本地 Cookie。
+
 ## 手机版安装包
 
 仓库不再放置手机版源码、Android SDK、构建缓存或旧安装包，只通过 GitHub Releases 发布最新 Android APK。打开仓库的 **Releases**，进入最新版本，在 **Assets** 下载 `video-link-v37.apk`。
@@ -77,3 +79,6 @@ venv\Scripts\python.exe -m unittest discover -s tests
 
 不要提交真实 Cookie、API Key、`.env`、视频文件、虚拟环境、Node 依赖或 Android/iOS 构建产物。项目采用 MIT 许可证，详见 [LICENSE](LICENSE)。
 
+## 许可证
+
+MIT License
