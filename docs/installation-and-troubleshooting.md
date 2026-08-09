@@ -30,6 +30,8 @@ venv\Scripts\python.exe -m unittest discover -s tests
 2. 确认下载器能找到 FFmpeg。
 3. 若页面要求登录，在 MCP 调用中传入 `cookies_from_browser` 或 Netscape 格式的 `cookies.txt`。
 
+直链下载中断后会保留 `.part` 临时文件，并在再次下载同一文件时尝试断点续传；连续网络失败会自动重试三次。下载完成后会抽样检查视频开头和结尾，不再完整解码整段视频。
+
 ## 手机版 APK
 
 从仓库的 **Releases → 最新版本 → Assets** 下载 `video-link-v37.apk`。手机版安装不需要 Node.js、Java/JDK、Gradle 或 Android SDK，这些构建工具不再随仓库发布。

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from lib.downloader import download_video
+from lib.local_credentials import clear_ai_api_key, get_ai_api_key, save_ai_api_key
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'VideoLinkAnalyzer'
@@ -89,7 +90,7 @@ def _ai_config() -> dict:
         'base_url': configured.get('base_url') or os.environ.get(
             'AGNES_API_BASE_URL', 'https://apihub.agnes-ai.com/v1/chat/completions'
         ),
-        'api_key': configured.get('api_key') or os.environ.get('AGNES_API_KEY', ''),
+        'api_key': get_ai_api_key() or configured.get('api_key') or os.environ.get('AGNES_API_KEY', ''),
         'model': configured.get('model') or os.environ.get('AGNES_MODEL', 'agnes-2.5-flash'),
         'temperature': max(0.0, min(2.0, temperature)),
         'timeout': max(5, min(180, timeout)),
@@ -440,6 +441,18 @@ def _save_settings(settings: dict) -> None:
     SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False), encoding='utf-8')
 
 
+def _migrate_plaintext_ai_key(settings: dict) -> None:
+    """Move an older plaintext API key from settings.json into Windows DPAPI."""
+    ai_settings = settings.get('ai')
+    if not isinstance(ai_settings, dict):
+        return
+    plaintext_key = str(ai_settings.pop('api_key', '') or '').strip()
+    if not plaintext_key:
+        return
+    save_ai_api_key(plaintext_key)
+    _save_settings(settings)
+
+
 def _human_size(value: int | None) -> str:
     if not value:
         return ''
@@ -500,6 +513,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         settings = _settings()
+        try:
+            _migrate_plaintext_ai_key(settings)
+        except OSError:
+            pass
         configured_vault = settings.get('knowledge_vault')
         _set_knowledge_vault(_knowledge_vault())
         if not configured_vault and DEFAULT_OBSIDIAN_VAULT.exists():
@@ -522,6 +539,7 @@ class MainWindow(QMainWindow):
         self.job_order: list[str] = []
         self.pending_job_ids: list[str] = []
         self.active_job_ids: set[str] = set()
+        self.cancel_events: dict[str, threading.Event] = {}
         self.authorization_session = None
         self.paused = False
         self.max_parallel_downloads = 2
@@ -840,15 +858,22 @@ class MainWindow(QMainWindow):
             if not current['model']:
                 set_status('请填写模型名称。', error=True)
                 return
+            api_key_value = current.pop('api_key')
             settings = _settings()
             settings['ai'] = current
             try:
+                if api_key_value:
+                    save_ai_api_key(api_key_value)
+                else:
+                    clear_ai_api_key()
                 _save_settings(settings)
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 set_status(f'保存失败：{exc}', error=True)
                 return
-            if current['api_key']:
-                os.environ['AGNES_API_KEY'] = current['api_key']
+            if api_key_value:
+                os.environ['AGNES_API_KEY'] = api_key_value
+            else:
+                os.environ.pop('AGNES_API_KEY', None)
             os.environ['AGNES_API_BASE_URL'] = current['base_url']
             os.environ['AGNES_MODEL'] = current['model']
             self._show_hint(f"AI 配置已保存：{current['provider']} / {current['model']}")
@@ -1033,6 +1058,7 @@ class MainWindow(QMainWindow):
         ]
         for job_id in failed_ids:
             self.jobs.pop(job_id, None)
+            self.cancel_events.pop(job_id, None)
             self.job_order = [item for item in self.job_order if item != job_id]
             self.pending_job_ids = [item for item in self.pending_job_ids if item != job_id]
         existing_urls = {
@@ -1045,6 +1071,7 @@ class MainWindow(QMainWindow):
                 continue
             job_id = uuid.uuid4().hex
             self.jobs[job_id] = {'id': job_id, 'url': url, 'title': url, 'stage': '等待下载', 'status': 'waiting', 'progress': 0, 'output_dir': str(self.output_dir)}
+            self.cancel_events[job_id] = threading.Event()
             self.job_order.append(job_id); self.pending_job_ids.append(job_id); existing_urls.add(url); added += 1
         self.url.clear(); self.task_card.show(); self.empty_queue.hide(); self.hint.hide()
         self._start_pending_jobs()
@@ -1073,6 +1100,7 @@ class MainWindow(QMainWindow):
             result = download_video(
                 job['url'], str(output_dir),
                 progress_callback=report,
+                cancel_callback=self.cancel_events[job_id].is_set,
             )
         except Exception as exc:
             result = {'success': False, 'error': f'无法保存或下载视频：{exc}'}
@@ -1089,8 +1117,15 @@ class MainWindow(QMainWindow):
 
     def _finished(self, job_id: str, result: dict):
         job = self.jobs.get(job_id); self.active_job_ids.discard(job_id)
+        self.cancel_events.pop(job_id, None)
         if not job:
             self._start_pending_jobs(); return
+        if result.get('cancelled'):
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self.pending_job_ids = [item for item in self.pending_job_ids if item != job_id]
+            self._show_hint('下载已取消。')
+            self._render_jobs(); self._start_pending_jobs(); return
         if not result.get('success'):
             job.update({'status': 'failed', 'stage': '下载失败', 'progress': 0})
             self._show_hint(result.get('error', '无法下载该链接'), error=True)
@@ -1168,7 +1203,29 @@ class MainWindow(QMainWindow):
         if progress.isTextVisible():
             progress.setFormat('下载中 %p%')
         content.addWidget(progress)
+        cancel = QPushButton('取消')
+        cancel.setObjectName('removeJobButton')
+        cancel.clicked.connect(lambda _checked=False, job_id=job['id']: self.cancel_job(job_id))
+        content.addWidget(cancel, 0, Qt.AlignmentFlag.AlignRight)
         return row
+
+    def cancel_job(self, job_id: str) -> None:
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        event = self.cancel_events.get(job_id)
+        if event:
+            event.set()
+        if job.get('status') == 'waiting':
+            self.jobs.pop(job_id, None)
+            self.cancel_events.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self.pending_job_ids = [item for item in self.pending_job_ids if item != job_id]
+            self._render_jobs()
+            self._show_hint('等待任务已取消。')
+        else:
+            job['stage'] = '正在取消'
+            self._render_jobs()
 
     def toggle_pause(self):
         if not any(job.get('status') == 'waiting' for job in self.jobs.values()):

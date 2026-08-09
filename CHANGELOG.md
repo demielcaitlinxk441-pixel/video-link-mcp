@@ -5,6 +5,11 @@
 - Made FFmpeg diagnostics use the same executable search as the downloader.
 - Disabled the public WeChat Channels Worker by default; enabling it now requires explicit opt-in.
 - Improved automated repository verification and cleaned unused assets.
+- Cached FFmpeg discovery and removed repeated yt-dlp page extraction.
+- Replaced full-file compatibility decoding with fast start/end sampling and faster conversion settings.
+- Added resumable direct downloads, automatic network retries, and active queue cancellation.
+- Replaced fixed browser waits with early completion when media is detected.
+- Encrypted desktop AI API keys with Windows DPAPI and migrated older plaintext settings.
 
 ## 0.4.0 - 2026-08-08
 

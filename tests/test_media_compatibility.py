@@ -113,7 +113,32 @@ class MediaCompatibilityTests(unittest.TestCase):
 
         self.assertFalse(checked['success'])
         self.assertEqual(checked['compatibility']['status'], 'missing_audio')
-        self.assertIn('Firefox', checked['error'])
+        self.assertNotIn('Firefox', checked['error'])
+        self.assertIn('Chrome/Edge', checked['error'])
+
+    def test_decode_check_samples_the_start_and_end_of_long_videos(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            return type('Completed', (), {'returncode': 0})()
+
+        with patch('lib.downloader.subprocess.run', side_effect=fake_run):
+            self.assertTrue(downloader._decode_check('video.mp4', 'ffmpeg', 120))
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn('-t', calls[0])
+        self.assertIn('-sseof', calls[1])
+
+    def test_ffmpeg_location_is_cached(self):
+        downloader.find_ffmpeg.cache_clear()
+        try:
+            with patch('lib.downloader.shutil.which', return_value='/usr/bin/ffmpeg') as which:
+                self.assertEqual(downloader.find_ffmpeg(), '/usr/bin/ffmpeg')
+                self.assertEqual(downloader.find_ffmpeg(), '/usr/bin/ffmpeg')
+            which.assert_called_once_with('ffmpeg')
+        finally:
+            downloader.find_ffmpeg.cache_clear()
 
     def test_verified_conversion_keeps_both_files_when_source_deletion_is_denied(self):
         with tempfile.TemporaryDirectory() as directory:

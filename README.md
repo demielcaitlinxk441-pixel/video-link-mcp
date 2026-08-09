@@ -15,7 +15,7 @@ Windows 运行 `setup.bat`；macOS/Linux 运行 `chmod +x setup.sh && ./setup.sh
 
 ## Windows 桌面下载器
 
-安装完成后运行 `scripts/start_desktop_app.bat`，或使用安装脚本创建的桌面快捷方式。粘贴视频链接、选择保存位置即可下载。抖音优先尝试移动分享页的完整 MP4，下载后会检查视频和音频轨道并输出兼容的 MP4。
+安装完成后运行 `scripts/start_desktop_app.bat`，或使用安装脚本创建的桌面快捷方式。粘贴视频链接、选择保存位置即可下载。抖音优先尝试移动分享页的完整 MP4，支持网络重试与断点续传；下载后会抽样检查视频和音频轨道并输出兼容的 MP4。队列中的等待任务和正在下载任务都可以取消。
 
 ## MCP 服务
 
@@ -80,6 +80,8 @@ venv\Scripts\python.exe -m unittest discover -s tests
 ## 安全与隐私
 
 不要提交真实 Cookie、API Key、`.env`、视频文件、虚拟环境、Node 依赖或 Android/iOS 构建产物。项目采用 MIT 许可证，详见 [LICENSE](LICENSE)。
+
+Windows 桌面版使用当前账户的 DPAPI 加密保存视频号授权和 AI API Key，明文密钥不会写入 `settings.json`。
 
 ## 许可证
 
