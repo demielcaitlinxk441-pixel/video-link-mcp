@@ -34,6 +34,7 @@ desktop.ini
 *.wav
 *.vtt
 *.srt
+*.part
 *.apk
 *.aab
 dist/

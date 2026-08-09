@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class RepositoryHygieneTests(unittest.TestCase):
     def test_gitignore_excludes_local_secrets_and_outputs(self):
         ignored = (ROOT / '.gitignore').read_text(encoding='utf-8')
-        for rule in ('.env', 'venv/', 'outputs/', 'cookies.txt', '*.mp4', '*.key'):
+        for rule in ('.env', 'venv/', 'outputs/', 'cookies.txt', '*.mp4', '*.part', '*.key'):
             self.assertIn(rule, ignored)
 
     def test_env_example_contains_names_but_no_secret_values(self):

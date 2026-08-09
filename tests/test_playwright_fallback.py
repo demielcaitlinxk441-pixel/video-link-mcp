@@ -71,7 +71,7 @@ class PlaywrightFallbackTests(unittest.TestCase):
 
         progress = []
         with tempfile.TemporaryDirectory() as output_dir, patch(
-            'lib.playwright_downloader.urllib.request.urlopen',
+            'lib.http_download.urllib.request.urlopen',
             return_value=Response(b'123456789012'),
         ):
             result = _download_file(

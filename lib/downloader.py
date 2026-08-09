@@ -12,14 +12,18 @@ import os
 import re
 import sys
 import json
+import shutil
 import subprocess
 import tempfile
 import time
 import glob
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
+
+from .http_download import DownloadCancelled, download_with_resume
 
 
 _MOBILE_DOUYIN_UA = (
@@ -63,6 +67,7 @@ def _is_douyin(url: str) -> bool:
 def _download_douyin_mobile(
     share_url: str, output_dir: str,
     report_progress: Callable[[dict], None],
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Use the same lightweight mobile-share-page flow as the Android app."""
     page_request = urllib.request.Request(share_url, headers={
@@ -94,27 +99,15 @@ def _download_douyin_mobile(
         suffix = video_id_match.group(1) if video_id_match else str(int(time.time()))
         target = os.path.join(output_dir, f'{title} [{suffix}].mp4')
 
-        video_request = urllib.request.Request(video_url, headers={
+        video_headers = {
             'User-Agent': _MOBILE_DOUYIN_UA,
             'Referer': page_url or 'https://www.douyin.com/',
-        })
+        }
         report_progress({'stage': '正在下载', 'progress': 0})
-        with urllib.request.urlopen(video_request, timeout=120) as response, \
-                open(target, 'wb') as output:
-            total = int(response.headers.get('Content-Length') or 0)
-            downloaded = 0
-            while True:
-                chunk = response.read(65536)
-                if not chunk:
-                    break
-                output.write(chunk)
-                downloaded += len(chunk)
-                report_progress({
-                    'stage': '正在下载',
-                    'progress': round(downloaded * 100 / total, 1) if total else None,
-                    'downloaded_bytes': downloaded,
-                    'total_bytes': total,
-                })
+        download_with_resume(
+            video_url, target, headers=video_headers,
+            progress_callback=report_progress, cancel_callback=cancel_callback,
+        )
         if os.path.getsize(target) < 1024:
             raise OSError('抖音返回的视频文件不完整')
         return {
@@ -125,6 +118,8 @@ def _download_douyin_mobile(
             'output_dir': output_dir,
             'download_method': 'douyin_mobile',
         }
+    except DownloadCancelled:
+        return {'success': False, 'error': '下载已取消', 'cancelled': True}
     except (OSError, urllib.error.URLError) as exc:
         if 'target' in locals() and os.path.exists(target):
             try:
@@ -155,6 +150,7 @@ def _run_playwright_intercept(
     url: str, output_dir: Optional[str], *, allow_interactive_verification: bool = False,
     progress_callback: Optional[Callable[[dict], None]] = None,
     ffmpeg_path: Optional[str] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Run Playwright's synchronous API outside an MCP asyncio loop.
 
@@ -167,28 +163,20 @@ def _run_playwright_intercept(
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='playwright-intercept'
     ) as executor:
-        if allow_interactive_verification or progress_callback or ffmpeg_path:
+        if allow_interactive_verification or progress_callback or ffmpeg_path or cancel_callback:
             return executor.submit(
                 intercept_download, url, output_dir, allow_interactive_verification,
-                progress_callback, ffmpeg_path,
+                progress_callback, ffmpeg_path, cancel_callback,
             ).result()
         return executor.submit(intercept_download, url, output_dir).result()
 
 
+@lru_cache(maxsize=1)
 def find_ffmpeg() -> Optional[str]:
     """Locate the ffmpeg executable on the system."""
-    # 1) Check PATH
-    try:
-        result = subprocess.run(
-            ['ffmpeg', '-version'],
-            capture_output=True,
-            timeout=5,
-            **_hidden_process_kwargs(),
-        )
-        if result.returncode == 0:
-            return 'ffmpeg'
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    path_match = shutil.which('ffmpeg')
+    if path_match:
+        return path_match
 
     # 2) Common Windows locations
     if sys.platform == 'win32':
@@ -208,10 +196,15 @@ def find_ffmpeg() -> Optional[str]:
             ):
                 if os.path.exists(pattern):
                     return pattern
-            # Recursive search
-            for match in glob.glob(
-                os.path.join(base, '**', 'ffmpeg.exe'), recursive=True
-            ):
+        # Winget uses versioned package folders; keep this search narrow so
+        # every download does not recursively scan the whole user profile.
+        local_app_data = os.environ.get('LOCALAPPDATA', '')
+        for pattern in (
+            os.path.join(local_app_data, 'Microsoft', 'WinGet', 'Packages',
+                         '*FFmpeg*', '**', 'bin', 'ffmpeg.exe'),
+            os.path.join(local_app_data, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
+        ):
+            for match in glob.glob(pattern, recursive=True):
                 return match
 
     return None
@@ -248,7 +241,7 @@ def _probe_media(path: str, ffprobe_path: str) -> Optional[dict]:
         result = subprocess.run(
             [
                 ffprobe_path, '-v', 'error', '-show_entries',
-                'format=format_name:stream=codec_type,codec_name,pix_fmt',
+                'format=format_name,duration:stream=codec_type,codec_name,pix_fmt',
                 '-of', 'json', path,
             ],
             capture_output=True, timeout=30,
@@ -296,20 +289,30 @@ def _compatible_output_path(source_path: str) -> str:
     return candidate
 
 
-def _decode_check(path: str, ffmpeg_path: str) -> bool:
-    """Decode video and audio streams fully so a successful result is playable."""
+def _decode_check(path: str, ffmpeg_path: str, duration: float = 0) -> bool:
+    """Decode short samples instead of reprocessing the entire downloaded video."""
+    commands = [[ffmpeg_path, '-v', 'error', '-i', path, '-t', '12']]
+    if duration > 30:
+        commands.append([ffmpeg_path, '-v', 'error', '-sseof', '-12', '-i', path])
     try:
-        result = subprocess.run(
-            [
-                ffmpeg_path, '-v', 'error', '-i', path,
-                '-map', '0:v:0', '-map', '0:a?', '-f', 'null', '-',
-            ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **_hidden_process_kwargs(),
-        )
-        return result.returncode == 0
-    except FileNotFoundError:
+        for command in commands:
+            result = subprocess.run(
+                [*command, '-map', '0:v:0', '-map', '0:a?', '-f', 'null', '-'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=90, **_hidden_process_kwargs(),
+            )
+            if result.returncode != 0:
+                return False
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _media_duration(media: Optional[dict]) -> float:
+    try:
+        return float((media or {}).get('format', {}).get('duration') or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _transcode_to_compatible_mp4(source_path: str, target_path: str,
@@ -321,7 +324,7 @@ def _transcode_to_compatible_mp4(source_path: str, target_path: str,
             [
                 ffmpeg_path, '-y', '-i', source_path,
                 '-map', '0:v:0', '-map', '0:a?',
-                '-c:v', 'libx264', '-preset', 'medium', '-crf', '20',
+                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
                 '-movflags', '+faststart', temporary_path,
             ],
@@ -363,8 +366,8 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
     if not any(stream.get('codec_type') == 'audio' for stream in source_streams):
         result['success'] = False
         result['error'] = (
-            '下载到的文件没有音轨。抖音需要读取浏览器 Cookie；'
-            '请先在 Firefox 登录抖音，再完全退出 Firefox 后重新下载。'
+            '下载到的文件没有音轨。请删除失败任务后重新下载；'
+            '若平台要求登录，请通过 MCP 配置 Chrome/Edge Cookie 或 cookies.txt。'
         )
         result['compatibility'] = {
             'status': 'missing_audio',
@@ -372,7 +375,9 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
         }
         return result
     if _is_high_compatibility_mp4(source_media):
-        if ffmpeg_path and _decode_check(source_path, ffmpeg_path):
+        if ffmpeg_path and _decode_check(
+            source_path, ffmpeg_path, _media_duration(source_media)
+        ):
             result['compatibility'] = {'status': 'already_compatible'}
         else:
             result['compatibility'] = {
@@ -399,7 +404,9 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
 
     report_progress({'stage': '正在验证兼容版视频'})
     target_media = _probe_media(target_path, ffprobe_path)
-    if _is_high_compatibility_mp4(target_media) and _decode_check(target_path, ffmpeg_path):
+    if _is_high_compatibility_mp4(target_media) and _decode_check(
+        target_path, ffmpeg_path, _media_duration(target_media)
+    ):
         result['source_video_path'] = source_path
         result['video_path'] = target_path
         result['size'] = os.path.getsize(target_path)
@@ -661,6 +668,7 @@ def download_video(
     proxy: Optional[str] = None,
     yuanbao_cookie: Optional[str] = None,
     progress_callback: Optional[Callable[[dict], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     Download a video with audio and subtitles.
@@ -691,6 +699,12 @@ def download_video(
             except Exception:
                 pass
 
+    def is_cancelled() -> bool:
+        return bool(cancel_callback and cancel_callback())
+
+    if is_cancelled():
+        return {'success': False, 'error': '下载已取消', 'cancelled': True}
+
     ffmpeg_path = find_ffmpeg()
 
     # WeChat Channels: use direct API or Worker API
@@ -706,7 +720,9 @@ def download_video(
     # Match the Android app's fast path: the mobile share page exposes a
     # directly downloadable MP4 and normally needs no browser authorization.
     if _is_douyin(url):
-        mobile_result = _download_douyin_mobile(url, output_dir, report_progress)
+        mobile_result = _download_douyin_mobile(
+            url, output_dir, report_progress, cancel_callback
+        )
         if mobile_result.get('success'):
             mobile_result = _ensure_compatible_video(
                 mobile_result, ffmpeg_path, report_progress
@@ -728,6 +744,7 @@ def download_video(
         result = _run_playwright_intercept(
             url, output_dir, allow_interactive_verification=True,
             progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
+            cancel_callback=cancel_callback,
         )
         result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
@@ -765,6 +782,8 @@ def download_video(
 
     if progress_callback:
         def progress_hook(data: dict) -> None:
+            if is_cancelled():
+                raise DownloadCancelled('下载已取消')
             status = data.get('status')
             if status == 'downloading':
                 total = data.get('total_bytes') or data.get('total_bytes_estimate')
@@ -789,7 +808,7 @@ def download_video(
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extract info for metadata + filename prediction
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True)
             video_id = info.get('id', '')
 
             metadata = {
@@ -809,9 +828,6 @@ def download_video(
 
             base_filename = ydl.prepare_filename(info)
             base_without_ext = os.path.splitext(base_filename)[0]
-
-            # Perform the actual download
-            ydl.download([url])
 
             # Locate downloaded files
             video_path = _find_video_file(base_without_ext, video_id, output_dir)
@@ -848,7 +864,11 @@ def download_video(
                 'proxy': proxy,
             }, ffmpeg_path, report_progress)
 
+    except DownloadCancelled:
+        return {'success': False, 'error': '下载已取消', 'cancelled': True}
     except Exception as e:
+        if is_cancelled():
+            return {'success': False, 'error': '下载已取消', 'cancelled': True}
         error_msg = str(e)
 
         # ── Playwright fallback ──────────────────────────────────
@@ -863,6 +883,7 @@ def download_video(
             pw_result = _run_playwright_intercept(
                 url, output_dir, allow_interactive_verification=_is_kuaishou(url),
                 progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
+                cancel_callback=cancel_callback,
             )
         except ImportError:
             return {
@@ -878,6 +899,8 @@ def download_video(
                 'success': False,
                 'error': f'Playwright fallback failed: {pw_error}',
             }
+        if pw_result.get('cancelled'):
+            return pw_result
         if pw_result.get('success'):
             # Build a result dict compatible with the yt-dlp path
             return _ensure_compatible_video({

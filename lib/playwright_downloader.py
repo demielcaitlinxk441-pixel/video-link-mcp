@@ -20,6 +20,8 @@ import urllib.request
 from urllib.parse import urlparse
 from typing import Callable, Optional
 
+from .http_download import DownloadCancelled, download_with_resume
+
 # Output directory defaults to system temp
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'video-link-analyzer')
 
@@ -103,45 +105,28 @@ def _download_file(
     referer: str = 'https://www.douyin.com/',
     progress_callback: Optional[Callable[[dict], None]] = None,
     extension: str = '.mp4',
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Download a video file directly from its URL."""
     os.makedirs(output_dir, exist_ok=True)
     safe_title = _sanitize_filename(title)
     output_path = os.path.join(output_dir, f'{safe_title}{extension}')
 
-    req = urllib.request.Request(video_url, headers={
+    headers = {
         'User-Agent': UA,
         'Referer': referer,
         'Accept': '*/*',
-        'Range': 'bytes=0-',
-    })
+    }
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            total = int(resp.headers.get('Content-Length', 0))
-            if resp.status in (206,) and total:
-                total += 1
-            downloaded = 0
-            last_progress = -1
-            with open(output_path, 'wb') as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total:
-                        progress = min(99, int(downloaded * 100 / total))
-                        if progress != last_progress:
-                            last_progress = progress
-                            progress_callback({
-                                'stage': '正在下载视频',
-                                'progress': progress,
-                                'downloaded_bytes': downloaded,
-                                'total_bytes': total,
-                            })
-        size = os.path.getsize(output_path)
+        size = download_with_resume(
+            video_url, output_path, headers=headers,
+            progress_callback=progress_callback, cancel_callback=cancel_callback,
+            stage='正在下载视频',
+        )
         return {'success': True, 'video_path': output_path, 'size': size}
+    except DownloadCancelled:
+        return {'success': False, 'error': '下载已取消', 'cancelled': True}
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
@@ -179,6 +164,7 @@ def intercept_download(
     allow_interactive_verification: bool = False,
     progress_callback: Optional[Callable[[dict], None]] = None,
     ffmpeg_path: Optional[str] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     Use Playwright to intercept video network requests and download directly.
@@ -364,7 +350,12 @@ def intercept_download(
                     break
                 page.wait_for_timeout(1000)
         else:
-            page.wait_for_timeout(8000)
+            # Stop waiting as soon as a usable media response is observed.
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not all_video_urls:
+                if cancel_callback and cancel_callback():
+                    return {'success': False, 'error': '下载已取消', 'cancelled': True}
+                page.wait_for_timeout(250)
 
         # Try to click play button (different selectors for different platforms)
         try:
@@ -374,7 +365,11 @@ def intercept_download(
                 play_btn = page.query_selector('video, .xgplayer-start, [data-e2e="video-play-btn"]')
             if play_btn:
                 play_btn.click()
-                page.wait_for_timeout(5000)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not all_video_urls:
+                    if cancel_callback and cancel_callback():
+                        return {'success': False, 'error': '下载已取消', 'cancelled': True}
+                    page.wait_for_timeout(250)
         except Exception:
             pass
 
@@ -470,6 +465,7 @@ def intercept_download(
         result = _download_file(
             vurl, page_title or 'video', output_dir, referer=referer,
             progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         )
         if result.get('success'):
             # Verify the downloaded file is not too small (likely a placeholder)
@@ -484,6 +480,7 @@ def intercept_download(
                     audio_result = _download_file(
                         audio_entry['url'], f'{page_title or "video"}-audio-{audio_number}',
                         output_dir, referer=referer, extension='.m4a',
+                        cancel_callback=cancel_callback,
                     )
                     if not audio_result.get('success'):
                         continue

@@ -145,7 +145,7 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue(self.window.task_card.isHidden())
         self.assertEqual(save.call_args.args[0]['title'], '测试视频')
 
-    def test_download_row_keeps_only_title_and_progress_without_scrollbars(self):
+    def test_download_row_keeps_compact_progress_and_cancel_action(self):
         row = self.window._job_row({
             'id': 'download-1', 'url': 'https://example.com/video', 'title': '测试视频',
             'status': 'active', 'stage': '正在下载视频', 'progress': 40,
@@ -156,7 +156,9 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(progress.value(), 40)
         self.assertTrue(progress.isTextVisible())
         self.assertEqual(progress.format(), '下载中 %p%')
-        self.assertEqual(row.findChildren(QPushButton), [])
+        buttons = row.findChildren(QPushButton)
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].text(), '取消')
         self.assertEqual(
             self.window.task_scroll.verticalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
@@ -165,6 +167,31 @@ class DesktopAppTests(unittest.TestCase):
             self.window.task_scroll.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
+
+    def test_plaintext_ai_key_is_migrated_out_of_settings(self):
+        settings = {'ai': {'provider': 'OpenAI', 'api_key': 'secret-key'}}
+        with patch('desktop_app.save_ai_api_key') as save_key, \
+             patch('desktop_app._save_settings') as save_settings:
+            desktop_app._migrate_plaintext_ai_key(settings)
+
+        save_key.assert_called_once_with('secret-key')
+        self.assertNotIn('api_key', settings['ai'])
+        save_settings.assert_called_once_with(settings)
+
+    def test_cancel_active_job_signals_worker(self):
+        import threading
+
+        self.window.jobs['active-1'] = {
+            'id': 'active-1', 'url': 'https://example.com/video',
+            'title': '测试视频', 'status': 'active', 'stage': '正在下载',
+        }
+        self.window.job_order = ['active-1']
+        self.window.cancel_events['active-1'] = threading.Event()
+
+        self.window.cancel_job('active-1')
+
+        self.assertTrue(self.window.cancel_events['active-1'].is_set())
+        self.assertEqual(self.window.jobs['active-1']['stage'], '正在取消')
 
     def test_right_click_action_deletes_the_selected_record_and_video_file(self):
         with tempfile.TemporaryDirectory() as directory:
