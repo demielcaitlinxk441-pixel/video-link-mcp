@@ -5,7 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from lib import downloader
-from lib.playwright_downloader import _download_file, _merge_audio, is_real_video_url
+from lib.playwright_downloader import (
+    _download_file, _is_audio_response, _is_kuaishou_url,
+    _media_candidates_ready, _merge_audio, is_real_video_url,
+)
 
 
 class PlaywrightFallbackTests(unittest.TestCase):
@@ -34,9 +37,37 @@ class PlaywrightFallbackTests(unittest.TestCase):
     def test_kuaishou_urls_and_cdn_are_detected(self):
         self.assertTrue(downloader._is_kuaishou('https://www.kuaishou.com/f/share-token'))
         self.assertTrue(downloader._is_kuaishou('https://m.gifshow.com/fw/photo/example'))
+        legacy_url = 'https://v.m.chenzhongtech.com/fw/photo/3xgspcsnjj4dfv9?cc=share_wxms'
+        self.assertTrue(downloader._is_kuaishou(legacy_url))
+        self.assertTrue(_is_kuaishou_url(legacy_url))
         self.assertFalse(downloader._is_kuaishou('https://www.bilibili.com/video/BV1xx'))
         self.assertTrue(is_real_video_url('https://tx2.a.kwimgs.com/upic/2026/07/16/example.mp4'))
         self.assertTrue(is_real_video_url('https://v1.kwaicdn.com/video/example.m3u8'))
+
+    def test_douyin_waits_for_delayed_audio_after_video(self):
+        videos = [{'url': 'https://cdn.example/media-video-avc1'}]
+
+        self.assertFalse(_media_candidates_ready(True, videos, []))
+        self.assertTrue(_media_candidates_ready(
+            True, videos, [{'url': 'https://cdn.example/media-audio'}]
+        ))
+        self.assertTrue(_media_candidates_ready(False, videos, []))
+
+    def test_douyin_audio_urls_are_recognized_across_cdn_variants(self):
+        self.assertTrue(_is_audio_response(
+            'https://v.douyinvod.com/media-audio/?codec_name=mp4a',
+            'application/octet-stream',
+        ))
+        self.assertTrue(_is_audio_response(
+            'https://v.douyinvod.com/play?mime_type=audio_mp4',
+            'application/octet-stream',
+        ))
+        self.assertTrue(_is_audio_response(
+            'https://v.douyinvod.com/opaque', 'audio/mp4'
+        ))
+        self.assertFalse(_is_audio_response(
+            'https://v.douyinvod.com/media-video-avc1', 'video/mp4'
+        ))
 
     def test_kuaishou_download_explains_the_manual_retry_step_without_yt_dlp_delay(self):
         progress = []
@@ -46,7 +77,8 @@ class PlaywrightFallbackTests(unittest.TestCase):
                 return_value={'success': False, 'error': 'verification required'},
             ) as intercept:
                 result = downloader.download_video(
-                    'https://www.kuaishou.com/f/share-token', output_dir,
+                    'https://v.m.chenzhongtech.com/fw/photo/3xgspcsnjj4dfv9?cc=share_wxms',
+                    output_dir,
                     progress_callback=progress.append,
                 )
 
