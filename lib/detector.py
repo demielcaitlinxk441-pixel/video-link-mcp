@@ -27,6 +27,10 @@ VIDEO_PLATFORMS = {
         'patterns': [r'douyin\.com/video', r'iesdouyin\.com/share', r'v\.douyin\.com'],
         'name': 'Douyin',
     },
+    'kuaishou': {
+        'patterns': [r'kuaishou\.com/', r'gifshow\.com/', r'chenzhongtech\.com/'],
+        'name': 'Kuaishou',
+    },
     'tiktok': {
         'patterns': [r'tiktok\.com/.+/video/', r'vm\.tiktok\.com'],
         'name': 'TikTok',

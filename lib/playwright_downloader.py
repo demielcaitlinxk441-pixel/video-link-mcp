@@ -92,6 +92,36 @@ def is_real_video_url(url: str) -> bool:
     return False
 
 
+def _is_audio_response(url: str, content_type: str = '') -> bool:
+    """Recognize separate audio streams even when the CDN labels them opaquely."""
+    lower = url.lower()
+    media_type = content_type.lower()
+    return (
+        'audio' in media_type
+        or any(token in lower for token in (
+            'mime_type=audio', 'media_type=audio', '/audio/', 'media-audio',
+            'audio_mp4', 'audio%2f', 'codec_name=mp4a', 'mp4a', '.aac',
+        ))
+    )
+
+
+def _media_candidates_ready(is_douyin: bool, video_urls: list, audio_urls: list) -> bool:
+    """Douyin is ready only after both its separate video and audio are observed."""
+    return bool(video_urls) and (not is_douyin or bool(audio_urls))
+
+
+def _is_kuaishou_url(url: str) -> bool:
+    """Recognize both current Kuaishou URLs and legacy share domains."""
+    host = urlparse(url).netloc.lower()
+    return (
+        host == 'kuaishou.com'
+        or host.endswith('.kuaishou.com')
+        or host.endswith('.gifshow.com')
+        or host == 'chenzhongtech.com'
+        or host.endswith('.chenzhongtech.com')
+    )
+
+
 def _sanitize_filename(title: str, max_len: int = 80) -> str:
     """Create a safe filename from a title string."""
     safe = ''.join(c for c in title if c.isalnum() or c in ' _-')[:max_len].strip()
@@ -201,7 +231,7 @@ def intercept_download(
     # Detect platform and configure accordingly
     is_xhs = 'xiaohongshu' in url.lower() or 'xhslink' in url.lower()
     is_douyin = 'douyin' in url.lower() or 'iesdouyin' in url.lower()
-    is_kuaishou = 'kuaishou.com' in url.lower() or 'gifshow.com' in url.lower()
+    is_kuaishou = _is_kuaishou_url(url)
 
     if is_xhs:
         # Xiaohongshu mobile web is more accessible (no login wall)
@@ -285,10 +315,7 @@ def intercept_download(
                     except Exception:
                         pass
 
-                is_audio = (
-                    'audio' in content_type.lower()
-                    or any(token in lower for token in ('mime_type=audio', 'media_type=audio', '/audio/'))
-                )
+                is_audio = _is_audio_response(resp_url, content_type)
                 if is_audio:
                     entry = {
                         'url': resp_url,
@@ -350,9 +377,13 @@ def intercept_download(
                     break
                 page.wait_for_timeout(1000)
         else:
-            # Stop waiting as soon as a usable media response is observed.
+            # For most platforms a video response is enough. Douyin commonly
+            # emits a video-only stream first and its separate audio slightly
+            # later, so keep listening until both arrive or the deadline ends.
             deadline = time.monotonic() + 8
-            while time.monotonic() < deadline and not all_video_urls:
+            while time.monotonic() < deadline and not _media_candidates_ready(
+                is_douyin, all_video_urls, all_audio_urls
+            ):
                 if cancel_callback and cancel_callback():
                     return {'success': False, 'error': '下载已取消', 'cancelled': True}
                 page.wait_for_timeout(250)
@@ -366,7 +397,9 @@ def intercept_download(
             if play_btn:
                 play_btn.click()
                 deadline = time.monotonic() + 5
-                while time.monotonic() < deadline and not all_video_urls:
+                while time.monotonic() < deadline and not _media_candidates_ready(
+                    is_douyin, all_video_urls, all_audio_urls
+                ):
                     if cancel_callback and cancel_callback():
                         return {'success': False, 'error': '下载已取消', 'cancelled': True}
                     page.wait_for_timeout(250)
