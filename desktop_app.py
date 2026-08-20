@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
 )
 
-from lib.downloader import download_video
+from lib.downloader import _is_kuaishou, download_video
 from lib.local_credentials import clear_ai_api_key, get_ai_api_key, save_ai_api_key
 
 ROOT = Path(__file__).resolve().parent
@@ -1020,9 +1020,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _is_kuaishou_url(url: str) -> bool:
-        host_match = re.match(r'https?://([^/]+)', url, flags=re.IGNORECASE)
-        host = host_match.group(1).lower() if host_match else ''
-        return host == 'kuaishou.com' or host.endswith('.kuaishou.com') or host.endswith('.gifshow.com')
+        return _is_kuaishou(url)
 
     def _show_kuaishou_notice(self) -> bool:
         """Explain the required user action before the Kuaishou browser opens."""
