@@ -55,7 +55,14 @@ def _is_wechat_channels(url: str) -> bool:
 def _is_kuaishou(url: str) -> bool:
     """Check whether a URL belongs to Kuaishou (快手)."""
     host = urlparse(url).netloc.lower()
-    return host == 'kuaishou.com' or host.endswith('.kuaishou.com') or host.endswith('.gifshow.com')
+    return (
+        host == 'kuaishou.com'
+        or host.endswith('.kuaishou.com')
+        or host.endswith('.gifshow.com')
+        # Older WeChat share links still use Kuaishou's legacy company domain.
+        or host == 'chenzhongtech.com'
+        or host.endswith('.chenzhongtech.com')
+    )
 
 
 def _is_douyin(url: str) -> bool:

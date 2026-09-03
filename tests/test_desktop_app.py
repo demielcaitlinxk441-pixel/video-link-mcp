@@ -64,7 +64,9 @@ class DesktopAppTests(unittest.TestCase):
         self.assertFalse(self.window.queue_summary.isHidden())
 
     def test_kuaishou_link_shows_notice_before_starting_the_download(self):
-        self.window.url.setPlainText('https://www.kuaishou.com/f/share-token')
+        self.window.url.setPlainText(
+            'https://v.m.chenzhongtech.com/fw/photo/3xgspcsnjj4dfv9?cc=share_wxms'
+        )
         with patch.object(self.window, '_show_kuaishou_notice', return_value=True) as notice, patch(
             'desktop_app.threading.Thread'
         ) as thread:
