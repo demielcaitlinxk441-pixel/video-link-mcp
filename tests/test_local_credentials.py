@@ -16,17 +16,23 @@ class LocalCredentialTests(unittest.TestCase):
                  patch.object(local_credentials, '_protect', side_effect=lambda value: f'enc:{value[::-1]}'), \
                  patch.object(local_credentials, '_unprotect', side_effect=lambda value: value.removeprefix('enc:')[::-1]):
                 local_credentials.save_yuanbao_cookie('yuanbao-secret')
+                local_credentials.save_bilibili_cookie('bilibili-secret')
+                local_credentials.save_douyin_cookie('douyin-secret')
                 local_credentials.save_ai_api_key('ai-secret')
 
                 stored = json.loads(credential_file.read_text(encoding='utf-8'))
                 self.assertNotIn('yuanbao-secret', credential_file.read_text(encoding='utf-8'))
-                self.assertEqual(set(stored), {'yuanbao_cookie', 'ai_api_key'})
+                self.assertEqual(set(stored), {'yuanbao_cookie', 'bilibili_cookie', 'douyin_cookie', 'ai_api_key'})
                 self.assertEqual(local_credentials.get_yuanbao_cookie(), 'yuanbao-secret')
+                self.assertEqual(local_credentials.get_bilibili_cookie(), 'bilibili-secret')
+                self.assertEqual(local_credentials.get_douyin_cookie(), 'douyin-secret')
                 self.assertEqual(local_credentials.get_ai_api_key(), 'ai-secret')
 
                 local_credentials.clear_ai_api_key()
                 self.assertEqual(local_credentials.get_ai_api_key(), '')
                 self.assertEqual(local_credentials.get_yuanbao_cookie(), 'yuanbao-secret')
+                self.assertEqual(local_credentials.get_bilibili_cookie(), 'bilibili-secret')
+                self.assertEqual(local_credentials.get_douyin_cookie(), 'douyin-secret')
 
 
 if __name__ == '__main__':

@@ -100,7 +100,7 @@ class MediaCompatibilityTests(unittest.TestCase):
         self.assertEqual(checked['compatibility']['status'], 'conversion_unavailable')
         self.assertEqual(checked['video_path'], str(source))
 
-    def test_video_without_audio_is_reported_as_failed(self):
+    def test_video_without_audio_is_kept_and_marked(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'silent.mp4'
             source.write_bytes(b'video')
@@ -110,11 +110,12 @@ class MediaCompatibilityTests(unittest.TestCase):
                 checked = downloader._ensure_compatible_video(
                     result, 'ffmpeg', lambda _: None
                 )
+            self.assertTrue(source.exists())
 
-        self.assertFalse(checked['success'])
+        self.assertTrue(checked['success'])
         self.assertEqual(checked['compatibility']['status'], 'missing_audio')
-        self.assertNotIn('Firefox', checked['error'])
-        self.assertIn('Chrome/Edge', checked['error'])
+        self.assertTrue(checked['compatibility']['audio_missing'])
+        self.assertIn('未检测到音轨', checked['compatibility']['message'])
 
     def test_decode_check_samples_the_start_and_end_of_long_videos(self):
         calls = []

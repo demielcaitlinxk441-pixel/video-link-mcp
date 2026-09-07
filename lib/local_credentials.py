@@ -11,6 +11,8 @@ from pathlib import Path
 APP_DIR = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'VideoLinkAnalyzer'
 CREDENTIALS_FILE = APP_DIR / 'credentials.json'
 _YUANBAO_COOKIE = 'yuanbao_cookie'
+_BILIBILI_COOKIE = 'bilibili_cookie'
+_DOUYIN_COOKIE = 'douyin_cookie'
 _AI_API_KEY = 'ai_api_key'
 
 
@@ -105,6 +107,36 @@ def save_yuanbao_cookie(cookie: str) -> None:
 def clear_yuanbao_cookie() -> None:
     """Remove the local credential for this Windows user."""
     _clear_credential(_YUANBAO_COOKIE)
+
+
+def get_bilibili_cookie() -> str:
+    """Return the Bilibili cookie decryptable by this Windows user, if present."""
+    return _get_credential(_BILIBILI_COOKIE)
+
+
+def save_bilibili_cookie(cookie: str) -> None:
+    """Encrypt the Bilibili cookie with Windows DPAPI before writing it locally."""
+    _save_credential(_BILIBILI_COOKIE, cookie)
+
+
+def clear_bilibili_cookie() -> None:
+    """Remove only the locally saved Bilibili authorization."""
+    _clear_credential(_BILIBILI_COOKIE)
+
+
+def get_douyin_cookie() -> str:
+    """Return the locally encrypted Douyin browser session, if configured."""
+    return _get_credential(_DOUYIN_COOKIE)
+
+
+def save_douyin_cookie(cookie: str) -> None:
+    """Save the owner's Douyin browser session for this Windows user only."""
+    _save_credential(_DOUYIN_COOKIE, cookie)
+
+
+def clear_douyin_cookie() -> None:
+    """Remove only the locally saved Douyin authorization."""
+    _clear_credential(_DOUYIN_COOKIE)
 
 
 def get_ai_api_key() -> str:

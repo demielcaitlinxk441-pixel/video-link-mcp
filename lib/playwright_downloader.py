@@ -195,6 +195,7 @@ def intercept_download(
     progress_callback: Optional[Callable[[dict], None]] = None,
     ffmpeg_path: Optional[str] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
+    douyin_cookie: Optional[str] = None,
 ) -> dict:
     """
     Use Playwright to intercept video network requests and download directly.
@@ -281,6 +282,8 @@ def intercept_download(
             viewport=viewport,
             locale='zh-CN',
         )
+        if is_douyin and douyin_cookie:
+            context.set_extra_http_headers({'Cookie': douyin_cookie})
         page = context.new_page()
 
         def handle_response(response):
@@ -406,6 +409,17 @@ def intercept_download(
         except Exception:
             pass
 
+        # Douyin often sends the video stream first and its separate audio
+        # stream a moment later.  Closing the page as soon as the video is
+        # seen creates a silent file, so allow a short, bounded grace period
+        # for that companion request to arrive.
+        if is_douyin and all_video_urls and not all_audio_urls:
+            audio_deadline = time.monotonic() + 5
+            while time.monotonic() < audio_deadline and not all_audio_urls:
+                if cancel_callback and cancel_callback():
+                    return {'success': False, 'error': '下载已取消', 'cancelled': True}
+                page.wait_for_timeout(250)
+
         # Get page metadata. Kuaishou may close its challenge page while the
         # user is verifying, so surface a useful failure instead of leaking a
         # Playwright TargetClosedError to the desktop app.
@@ -447,6 +461,16 @@ def intercept_download(
                         video_src_urls.append(src)
         except Exception:
             pass
+
+        # Some public Douyin pages expose their soundtrack in embedded page
+        # data without requesting it until the user enables sound. Capture that
+        # published URL too, so a video-only stream can be muxed when possible.
+        if is_douyin:
+            try:
+                page_html = page.content()
+                _extract_douyin_audio_from_html(page_html, all_audio_urls)
+            except Exception:
+                pass
 
         # For XHS: try to extract video URL from page HTML/JS
         if is_xhs:
@@ -587,6 +611,37 @@ def _extract_xhs_video_from_html(html: str, url_list: list):
                 'content_length': 0,
                 'content_type': 'video/mp4',
                 'is_real_video': True,
+                'status': 200,
+            }
+            if entry not in url_list:
+                url_list.append(entry)
+
+
+def _extract_douyin_audio_from_html(html: str, url_list: list):
+    """Extract public soundtrack URLs embedded in a Douyin page's music data."""
+    if not html:
+        return
+
+    # Douyin serializes this data with either literal slashes, ``\\/`` or
+    # ``\\u002F``. Limit matching to the ``music`` object so video play URLs
+    # are never accidentally treated as a soundtrack.
+    music_blocks = re.findall(
+        r'"music"\s*:\s*\{(.{0,20000}?)"play_url"\s*:\s*\{(.{0,5000}?)"url_list"\s*:\s*\[(.*?)\]',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    for _prefix, _play_url, raw_urls in music_blocks:
+        for candidate in re.findall(
+            r'https?(?::|\\u003A)(?://|(?:\\u002F|\\/){2})[^"\s,]+', raw_urls
+        ):
+            audio_url = (
+                candidate.replace('\\u0026', '&').replace('\\u003A', ':')
+                .replace('\\u002F', '/').replace('\\/', '/')
+            )
+            entry = {
+                'url': audio_url,
+                'content_length': 0,
+                'content_type': 'audio/mpeg',
                 'status': 200,
             }
             if entry not in url_list:

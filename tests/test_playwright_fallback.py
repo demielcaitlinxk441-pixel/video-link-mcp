@@ -7,7 +7,8 @@ from unittest.mock import patch
 from lib import downloader
 from lib.playwright_downloader import (
     _download_file, _is_audio_response, _is_kuaishou_url,
-    _media_candidates_ready, _merge_audio, is_real_video_url,
+    _extract_douyin_audio_from_html, _media_candidates_ready, _merge_audio,
+    is_real_video_url,
 )
 
 
@@ -137,6 +138,20 @@ class PlaywrightFallbackTests(unittest.TestCase):
 
             with open(video, 'rb') as stream:
                 self.assertEqual(stream.read(), b'merged')
+
+    def test_public_douyin_music_url_is_collected_from_page_data(self):
+        urls = []
+        html = r'''{"music":{"title":"test","play_url":{"url_list":[
+            "https:\u002F\u002Fcdn.example.com\u002Faudio\u002Fsound.mp3?x=1\u0026y=2"
+        ]}},"video":{"play_addr":{"url_list":["https://cdn.example.com/video.mp4"]}}}'''
+
+        _extract_douyin_audio_from_html(html, urls)
+
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(
+            urls[0]['url'], 'https://cdn.example.com/audio/sound.mp3?x=1&y=2'
+        )
+        self.assertEqual(urls[0]['content_type'], 'audio/mpeg')
 
 
 if __name__ == '__main__':

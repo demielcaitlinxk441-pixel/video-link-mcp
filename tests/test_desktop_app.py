@@ -147,6 +147,26 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue(self.window.task_card.isHidden())
         self.assertEqual(save.call_args.args[0]['title'], '测试视频')
 
+    def test_finished_silent_video_is_saved_with_an_audio_warning(self):
+        job_id = 'download-silent'
+        self.window.jobs[job_id] = {
+            'id': job_id, 'url': 'https://example.com/video', 'title': 'https://example.com/video',
+            'status': 'active', 'stage': '正在下载', 'progress': 30, 'meta': '',
+        }
+        self.window.job_order.append(job_id)
+        self.window.active_job_ids.add(job_id)
+        with patch('desktop_app._save_history') as save, patch.object(self.window, '_load_history'), patch.object(self.window, '_show_hint') as hint:
+            self.window._finished(job_id, {
+                'success': True,
+                'video_path': 'C:/downloads/silent.mp4',
+                'size': 1024,
+                'metadata': {'title': '无声视频'},
+                'compatibility': {'status': 'missing_audio', 'audio_missing': True},
+            })
+
+        self.assertEqual(save.call_args.args[0]['metadata']['audio_status'], 'missing')
+        hint.assert_called_once_with('视频已保存，但未检测到音轨。')
+
     def test_download_row_keeps_compact_progress_and_cancel_action(self):
         row = self.window._job_row({
             'id': 'download-1', 'url': 'https://example.com/video', 'title': '测试视频',

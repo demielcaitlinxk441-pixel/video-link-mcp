@@ -569,6 +569,8 @@ class MainWindow(QMainWindow):
         self.destination_path = QLabel(); self.destination_path.setObjectName('destinationPath'); self.destination_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed); destination.addWidget(self.destination_path, 1)
         self.folder_button = QPushButton('选择位置'); self.folder_button.setObjectName('folderButton'); self.folder_button.clicked.connect(self.choose_folder); destination.addWidget(self.folder_button)
         self.authorization_button = QPushButton('视频号授权'); self.authorization_button.setObjectName('authorizationButton'); self.authorization_button.clicked.connect(self.show_wechat_authorization); destination.addWidget(self.authorization_button)
+        self.bilibili_authorization_button = QPushButton('B站授权'); self.bilibili_authorization_button.setObjectName('authorizationButton'); self.bilibili_authorization_button.setToolTip('使用本人 B站登录状态下载 B站视频'); self.bilibili_authorization_button.clicked.connect(self.show_bilibili_authorization); destination.addWidget(self.bilibili_authorization_button)
+        self.douyin_authorization_button = QPushButton('抖音授权'); self.douyin_authorization_button.setObjectName('authorizationButton'); self.douyin_authorization_button.setToolTip('使用本人抖音登录状态下载带音频的视频'); self.douyin_authorization_button.clicked.connect(self.show_douyin_authorization); destination.addWidget(self.douyin_authorization_button)
         self.ai_config_button = QPushButton('AI 配置'); self.ai_config_button.setObjectName('aiConfigButton'); self.ai_config_button.setToolTip('配置 AI 服务商、API 地址、密钥和模型'); self.ai_config_button.clicked.connect(self.show_ai_config); destination.addWidget(self.ai_config_button)
         self.chat_toggle_button = QPushButton('AI'); self.chat_toggle_button.setObjectName('chatToggleButton'); self.chat_toggle_button.setToolTip('展开或收起 AI 知识库助手'); self.chat_toggle_button.setFixedWidth(46); self.chat_toggle_button.clicked.connect(self.toggle_chat_dock); destination.addWidget(self.chat_toggle_button)
         layout.addLayout(destination)
@@ -998,6 +1000,180 @@ class MainWindow(QMainWindow):
         dialog.rejected.connect(lambda: self.authorization_session.cancel() if self.authorization_session else None)
         dialog.exec()
 
+    def show_bilibili_authorization(self):
+        """Save the owner's Bilibili session in Windows-encrypted local storage."""
+        from lib.local_credentials import clear_bilibili_cookie, get_bilibili_cookie
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('B站授权')
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        heading = QLabel('使用本人 B站账号下载视频')
+        heading.setObjectName('authorizationTitle')
+        layout.addWidget(heading)
+        explanation = QLabel('点击授权后会打开独立 B站窗口。你自己完成登录后，回到这里点击“完成登录”。程序只将 B站授权加密保存在本机。')
+        explanation.setWordWrap(True)
+        explanation.setObjectName('authorizationHelp')
+        layout.addWidget(explanation)
+        start_button = QPushButton('开始 B站授权')
+        start_button.setObjectName('reauthorizeButton')
+        layout.addWidget(start_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        finish_button = QPushButton('完成登录')
+        finish_button.setObjectName('authorizationButton')
+        finish_button.setEnabled(False)
+        finish_button.hide()
+        layout.addWidget(finish_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        configured = bool(get_bilibili_cookie())
+        state = QLabel('当前状态：已配置本机 B站授权' if configured else '当前状态：未配置本机 B站授权')
+        state.setObjectName('authorizationState')
+        layout.addWidget(state)
+        clear_button = QPushButton('清除本机 B站授权')
+        clear_button.setObjectName('removeJobButton')
+        clear_button.setEnabled(configured)
+        layout.addWidget(clear_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        auth_events = AuthorizationEvents(dialog)
+
+        def start_authorization():
+            from lib.bilibili_authorization import BilibiliAuthorizationSession
+            start_button.setEnabled(False)
+            state.setText('正在打开 B站登录窗口…')
+            self.authorization_session = BilibiliAuthorizationSession(
+                auth_events.opened.emit, auth_events.success.emit, auth_events.error.emit
+            )
+            self.authorization_session.start()
+
+        def authorization_opened():
+            state.setText('已打开 B站。完成本人登录后，回到这里点击“完成登录”。')
+            finish_button.show()
+            finish_button.setEnabled(True)
+
+        def finish_authorization():
+            finish_button.setEnabled(False)
+            state.setText('正在保存本机 B站授权…')
+            if self.authorization_session:
+                self.authorization_session.finish_login()
+
+        def authorization_success():
+            self.authorization_session = None
+            self._show_hint('本机 B站授权已更新。之后的 B站链接会优先使用你的账号下载。')
+            dialog.accept()
+
+        def authorization_error(message: str):
+            self.authorization_session = None
+            start_button.setEnabled(True)
+            finish_button.hide()
+            state.setText(message)
+            state.setObjectName('authorizationError')
+            state.style().unpolish(state)
+            state.style().polish(state)
+
+        def clear_authorization():
+            clear_bilibili_cookie()
+            state.setText('当前状态：未配置本机 B站授权')
+            clear_button.setEnabled(False)
+            self._show_hint('已清除本机 B站授权。')
+
+        auth_events.opened.connect(authorization_opened)
+        auth_events.success.connect(authorization_success)
+        auth_events.error.connect(authorization_error)
+        start_button.clicked.connect(start_authorization)
+        finish_button.clicked.connect(finish_authorization)
+        clear_button.clicked.connect(clear_authorization)
+        dialog.rejected.connect(lambda: self.authorization_session.cancel() if self.authorization_session else None)
+        dialog.exec()
+
+    def show_douyin_authorization(self):
+        """Save the owner's Douyin session for audio-capable downloads."""
+        from lib.local_credentials import clear_douyin_cookie, get_douyin_cookie
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('抖音授权')
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        heading = QLabel('使用本人抖音账号下载带音频的视频')
+        heading.setObjectName('authorizationTitle')
+        layout.addWidget(heading)
+        explanation = QLabel('点击授权后会打开独立抖音窗口。你自己完成登录后，回到这里点击“完成登录”。程序只将抖音授权加密保存在本机。')
+        explanation.setWordWrap(True)
+        explanation.setObjectName('authorizationHelp')
+        layout.addWidget(explanation)
+        start_button = QPushButton('开始抖音授权')
+        start_button.setObjectName('reauthorizeButton')
+        layout.addWidget(start_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        finish_button = QPushButton('完成登录')
+        finish_button.setObjectName('authorizationButton')
+        finish_button.setEnabled(False)
+        finish_button.hide()
+        layout.addWidget(finish_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        configured = bool(get_douyin_cookie())
+        state = QLabel('当前状态：已配置本机抖音授权' if configured else '当前状态：未配置本机抖音授权')
+        state.setObjectName('authorizationState')
+        layout.addWidget(state)
+        clear_button = QPushButton('清除本机抖音授权')
+        clear_button.setObjectName('removeJobButton')
+        clear_button.setEnabled(configured)
+        layout.addWidget(clear_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        auth_events = AuthorizationEvents(dialog)
+
+        def start_authorization():
+            from lib.douyin_authorization import DouyinAuthorizationSession
+            start_button.setEnabled(False)
+            state.setText('正在打开抖音登录窗口…')
+            self.authorization_session = DouyinAuthorizationSession(
+                auth_events.opened.emit, auth_events.success.emit, auth_events.error.emit
+            )
+            self.authorization_session.start()
+
+        def authorization_opened():
+            state.setText('已打开抖音。完成本人登录后，回到这里点击“完成登录”。')
+            finish_button.show()
+            finish_button.setEnabled(True)
+
+        def finish_authorization():
+            finish_button.setEnabled(False)
+            state.setText('正在保存本机抖音授权…')
+            if self.authorization_session:
+                self.authorization_session.finish_login()
+
+        def authorization_success():
+            self.authorization_session = None
+            self._show_hint('本机抖音授权已更新。抖音下载会优先尝试带音频版本。')
+            dialog.accept()
+
+        def authorization_error(message: str):
+            self.authorization_session = None
+            start_button.setEnabled(True)
+            finish_button.hide()
+            state.setText(message)
+            state.setObjectName('authorizationError')
+            state.style().unpolish(state)
+            state.style().polish(state)
+
+        def clear_authorization():
+            clear_douyin_cookie()
+            state.setText('当前状态：未配置本机抖音授权')
+            clear_button.setEnabled(False)
+            self._show_hint('已清除本机抖音授权。')
+
+        auth_events.opened.connect(authorization_opened)
+        auth_events.success.connect(authorization_success)
+        auth_events.error.connect(authorization_error)
+        start_button.clicked.connect(start_authorization)
+        finish_button.clicked.connect(finish_authorization)
+        clear_button.clicked.connect(clear_authorization)
+        dialog.rejected.connect(lambda: self.authorization_session.cancel() if self.authorization_session else None)
+        dialog.exec()
+
     def _save_wechat_authorization(self, cookie_input: QLineEdit, dialog: QDialog):
         from lib.local_credentials import save_yuanbao_cookie
         try:
@@ -1128,9 +1304,13 @@ class MainWindow(QMainWindow):
             job.update({'status': 'failed', 'stage': '下载失败', 'progress': 0})
             self._show_hint(result.get('error', '无法下载该链接'), error=True)
             self._render_jobs(); self._start_pending_jobs(); return
-        metadata = result.get('metadata', {}); title = metadata.get('title') or Path(result['video_path']).stem
+        metadata = dict(result.get('metadata') or {}); title = metadata.get('title') or Path(result['video_path']).stem
         compatibility = result.get('compatibility') or {}; compatibility_status = compatibility.get('status')
-        if compatibility_status in {'conversion_unavailable', 'conversion_failed'}:
+        if compatibility_status == 'missing_audio':
+            metadata['audio_status'] = 'missing'
+            job.update({'stage': '下载完成（无音频）', 'meta': f"已保存（无音频） · {_human_size(result.get('size'))}"})
+            self._show_hint('视频已保存，但未检测到音轨。')
+        elif compatibility_status in {'conversion_unavailable', 'conversion_failed'}:
             self._show_hint('视频已保存，但兼容性检查没有完成；请确认已安装 ffmpeg。', error=True)
         else:
             job.update({'stage': '下载完成', 'meta': f"已保存 · {_human_size(result.get('size'))}"})
@@ -1141,7 +1321,7 @@ class MainWindow(QMainWindow):
                 'video_path': result['video_path'],
                 'size': result.get('size', 0),
                 'created_at': int(time.time()),
-                'metadata': result.get('metadata') or {},
+                'metadata': metadata,
                 'subtitle_text': (result.get('subtitle_text') or '')[:12000],
                 'subtitle_path': result.get('subtitle_path'),
                 'knowledge_base': False,
@@ -1194,12 +1374,22 @@ class MainWindow(QMainWindow):
         title = QLabel(job.get('title', job['url'])); title.setObjectName('jobTitle'); title.setWordWrap(True)
         title.setToolTip(job.get('title', job['url']))
         content.addWidget(title)
-        progress = QProgressBar(); progress.setRange(0, 100)
-        progress.setValue(int(job.get('progress') or 0))
-        is_downloading = job.get('stage') in {'正在下载', '正在下载视频'}
-        progress.setTextVisible(is_downloading and job.get('progress') is not None)
-        if progress.isTextVisible():
-            progress.setFormat('下载中 %p%')
+        progress = QProgressBar()
+        current_progress = job.get('progress')
+        is_active = job.get('status') == 'active'
+        if is_active and current_progress is None:
+            # An indeterminate bar makes parsing, verification and waiting
+            # states visibly active instead of looking like a frozen task.
+            progress.setRange(0, 0)
+            progress.setTextVisible(True)
+            progress.setFormat(job.get('stage') or '正在处理')
+        else:
+            progress.setRange(0, 100)
+            progress.setValue(int(current_progress or 0))
+            is_downloading = job.get('stage') in {'正在下载', '正在下载视频'}
+            progress.setTextVisible(is_downloading and current_progress is not None)
+            if progress.isTextVisible():
+                progress.setFormat('下载中 %p%')
         content.addWidget(progress)
         cancel = QPushButton('取消')
         cancel.setObjectName('removeJobButton')
@@ -1244,6 +1434,8 @@ class MainWindow(QMainWindow):
         for entry in _history():
             if entry.get('knowledge_base'):
                 status = f"已加入知识库 · {entry.get('category', '其他')}"
+            elif (entry.get('metadata') or {}).get('audio_status') == 'missing':
+                status = '无音频 · 右键加入知识库'
             else:
                 status = '右键加入知识库'
             if entry.get('id') in self._knowledge_add_ids:

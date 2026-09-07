@@ -71,10 +71,17 @@ def _is_douyin(url: str) -> bool:
     return host == 'douyin.com' or host.endswith('.douyin.com') or host.endswith('.iesdouyin.com')
 
 
+def _is_bilibili(url: str) -> bool:
+    """Check whether a URL belongs to Bilibili."""
+    host = urlparse(url).netloc.lower()
+    return host == 'b23.tv' or host.endswith('.b23.tv') or host == 'bilibili.com' or host.endswith('.bilibili.com')
+
+
 def _download_douyin_mobile(
     share_url: str, output_dir: str,
     report_progress: Callable[[dict], None],
     cancel_callback: Optional[Callable[[], bool]] = None,
+    douyin_cookie: Optional[str] = None,
 ) -> dict:
     """Use the same lightweight mobile-share-page flow as the Android app."""
     page_request = urllib.request.Request(share_url, headers={
@@ -82,6 +89,8 @@ def _download_douyin_mobile(
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     })
+    if douyin_cookie:
+        page_request.add_header('Cookie', douyin_cookie)
     try:
         report_progress({'stage': '正在解析抖音分享页'})
         with urllib.request.urlopen(page_request, timeout=30) as response:
@@ -110,6 +119,8 @@ def _download_douyin_mobile(
             'User-Agent': _MOBILE_DOUYIN_UA,
             'Referer': page_url or 'https://www.douyin.com/',
         }
+        if douyin_cookie:
+            video_headers['Cookie'] = douyin_cookie
         report_progress({'stage': '正在下载', 'progress': 0})
         download_with_resume(
             video_url, target, headers=video_headers,
@@ -136,6 +147,16 @@ def _download_douyin_mobile(
         return {'success': False, 'error': f'抖音移动下载失败：{exc}'}
 
 
+def _contains_audio_track(path: str, ffmpeg_path: Optional[str]) -> bool:
+    """Return whether a downloaded direct MP4 includes an audio stream."""
+    ffprobe_path = _find_ffprobe(ffmpeg_path)
+    media = _probe_media(path, ffprobe_path) if ffprobe_path else None
+    return any(
+        stream.get('codec_type') == 'audio'
+        for stream in (media or {}).get('streams', [])
+    )
+
+
 def _handle_wechat_channels_download(url: str, output_dir: str, **kwargs) -> dict:
     """
     Fully automated WeChat Channels video download.
@@ -158,6 +179,7 @@ def _run_playwright_intercept(
     progress_callback: Optional[Callable[[dict], None]] = None,
     ffmpeg_path: Optional[str] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
+    douyin_cookie: Optional[str] = None,
 ) -> dict:
     """Run Playwright's synchronous API outside an MCP asyncio loop.
 
@@ -170,10 +192,10 @@ def _run_playwright_intercept(
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='playwright-intercept'
     ) as executor:
-        if allow_interactive_verification or progress_callback or ffmpeg_path or cancel_callback:
+        if allow_interactive_verification or progress_callback or ffmpeg_path or cancel_callback or douyin_cookie:
             return executor.submit(
                 intercept_download, url, output_dir, allow_interactive_verification,
-                progress_callback, ffmpeg_path, cancel_callback,
+                progress_callback, ffmpeg_path, cancel_callback, douyin_cookie,
             ).result()
         return executor.submit(intercept_download, url, output_dir).result()
 
@@ -371,14 +393,10 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
     source_media = _probe_media(source_path, ffprobe_path)
     source_streams = (source_media or {}).get('streams') or []
     if not any(stream.get('codec_type') == 'audio' for stream in source_streams):
-        result['success'] = False
-        result['error'] = (
-            '下载到的文件没有音轨。请删除失败任务后重新下载；'
-            '若平台要求登录，请通过 MCP 配置 Chrome/Edge Cookie 或 cookies.txt。'
-        )
         result['compatibility'] = {
             'status': 'missing_audio',
-            'message': result['error'],
+            'message': '视频已保存，但未检测到音轨。',
+            'audio_missing': True,
         }
         return result
     if _is_high_compatibility_mp4(source_media):
@@ -674,6 +692,8 @@ def download_video(
     cookies_file: Optional[str] = None,
     proxy: Optional[str] = None,
     yuanbao_cookie: Optional[str] = None,
+    bilibili_cookie: Optional[str] = None,
+    douyin_cookie: Optional[str] = None,
     progress_callback: Optional[Callable[[dict], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> dict:
@@ -690,6 +710,8 @@ def download_video(
         proxy: Proxy URL, e.g. 'http://127.0.0.1:7890'.
         yuanbao_cookie: Yuanbao web cookie for WeChat Channels direct API mode.
             If not provided, checks WECHAT_CHANNELS_YUANBAO_COOKIE env var.
+        bilibili_cookie: Bilibili session cookie from the local authorization flow.
+        douyin_cookie: Douyin session cookie from the local authorization flow.
 
     Returns:
         dict with success status, file paths, subtitle text, and metadata.
@@ -714,6 +736,13 @@ def download_video(
 
     ffmpeg_path = find_ffmpeg()
 
+    if _is_bilibili(url) and not bilibili_cookie:
+        from .local_credentials import get_bilibili_cookie
+        bilibili_cookie = get_bilibili_cookie()
+    if _is_douyin(url) and not douyin_cookie:
+        from .local_credentials import get_douyin_cookie
+        douyin_cookie = get_douyin_cookie()
+
     # WeChat Channels: use direct API or Worker API
     if _is_wechat_channels(url):
         report_progress({'stage': '正在解析微信视频号链接'})
@@ -728,16 +757,18 @@ def download_video(
     # directly downloadable MP4 and normally needs no browser authorization.
     if _is_douyin(url):
         mobile_result = _download_douyin_mobile(
-            url, output_dir, report_progress, cancel_callback
+            url, output_dir, report_progress, cancel_callback, douyin_cookie
         )
         if mobile_result.get('success'):
-            mobile_result = _ensure_compatible_video(
-                mobile_result, ffmpeg_path, report_progress
-            )
-            report_progress({
-                'stage': '完成' if mobile_result.get('success') else '下载失败'
-            })
-            return mobile_result
+            if _contains_audio_track(mobile_result['video_path'], ffmpeg_path):
+                mobile_result = _ensure_compatible_video(
+                    mobile_result, ffmpeg_path, report_progress
+                )
+                report_progress({
+                    'stage': '完成' if mobile_result.get('success') else '下载失败'
+                })
+                return mobile_result
+            report_progress({'stage': '检测到无声抖音流，正在尝试获取音频版本'})
 
     # yt-dlp 目前不支持快手新版分享页。直接进入可见浏览器流程，避免
     # 先等待一次必然失败的解析。快手可能展示“浏览器版本过低”；用户需
@@ -786,6 +817,17 @@ def download_video(
         'noprogress': True,
         'overwrites': False,
     }
+    if _is_bilibili(url) and bilibili_cookie:
+        base_opts['http_headers'] = {
+            'Cookie': bilibili_cookie,
+            'Referer': 'https://www.bilibili.com/',
+        }
+    if _is_douyin(url) and douyin_cookie:
+        base_opts['http_headers'] = {
+            'Cookie': douyin_cookie,
+            'Referer': 'https://www.douyin.com/',
+            'User-Agent': _MOBILE_DOUYIN_UA,
+        }
 
     if progress_callback:
         def progress_hook(data: dict) -> None:
@@ -890,7 +932,7 @@ def download_video(
             pw_result = _run_playwright_intercept(
                 url, output_dir, allow_interactive_verification=_is_kuaishou(url),
                 progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
-                cancel_callback=cancel_callback,
+                cancel_callback=cancel_callback, douyin_cookie=douyin_cookie,
             )
         except ImportError:
             return {
