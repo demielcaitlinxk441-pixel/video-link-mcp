@@ -24,13 +24,14 @@ from PySide6.QtWidgets import (
     QFormLayout,
 )
 
-from lib.downloader import _is_kuaishou, download_video
+from lib.downloader import _is_kuaishou, download_video, retry_audio, retry_subtitle
 from lib.local_credentials import clear_ai_api_key, get_ai_api_key, save_ai_api_key
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'VideoLinkAnalyzer'
 HISTORY_FILE = APP_DIR / 'history.json'
 SETTINGS_FILE = APP_DIR / 'settings.json'
+QUEUE_FILE = APP_DIR / 'queue.json'
 # Keep the repository portable: a machine-specific Vault is stored in settings.
 DEFAULT_OBSIDIAN_VAULT = Path.home() / 'Videos' / 'VideoLinkAnalyzerVault'
 OBSIDIAN_VAULT = DEFAULT_OBSIDIAN_VAULT
@@ -406,6 +407,29 @@ def _save_history(item: dict) -> None:
     HISTORY_FILE.write_text(json.dumps([item, *_history()][:20], ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def _load_queue() -> list[dict]:
+    try:
+        value = json.loads(QUEUE_FILE.read_text(encoding='utf-8'))
+        return value if isinstance(value, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_queue(items: list[dict]) -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    QUEUE_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _update_history_entry(entry_id: str, updates: dict) -> None:
+    entries = _history()
+    for entry in entries:
+        if entry.get('id') == entry_id:
+            entry.update(updates)
+            break
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def _remove_history_entry(entry_id: str) -> None:
     """Remove one local list record without touching the downloaded video."""
     remaining = [entry for entry in _history() if entry.get('id') != entry_id]
@@ -459,6 +483,15 @@ def _human_size(value: int | None) -> str:
     if value >= 1024 ** 3:
         return f'{value / 1024 ** 3:.2f} GB'
     return f'{value / 1024 ** 2:.1f} MB'
+
+
+def _failure_display(result: dict) -> str:
+    failure = result.get('failure') or {}
+    reason = failure.get('reason') or result.get('error', '无法下载该链接')
+    action = failure.get('suggested_action') or '请稍后重试。'
+    video_path = result.get('video_path') or (result.get('artifacts') or {}).get('video_path')
+    completed = '画面已保存。' if video_path and Path(video_path).is_file() else '尚未生成可用媒体文件。'
+    return f'问题原因：{reason} 已完成内容：{completed} 处理办法：{action}'
 
 
 class DownloadEvents(QObject):
@@ -540,6 +573,8 @@ class MainWindow(QMainWindow):
         self.pending_job_ids: list[str] = []
         self.active_job_ids: set[str] = set()
         self.cancel_events: dict[str, threading.Event] = {}
+        self._last_queue_persist = 0.0
+        self._last_queue_signature = None
         self.authorization_session = None
         self.paused = False
         self.max_parallel_downloads = 2
@@ -553,8 +588,50 @@ class MainWindow(QMainWindow):
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
         self._build()
+        self._restore_jobs()
         self._render_jobs()
         self._load_history()
+        if self.pending_job_ids:
+            QTimer.singleShot(0, self._start_pending_jobs)
+
+    def _restore_jobs(self) -> None:
+        """Restore unfinished local jobs; interrupted active jobs become resumable."""
+        for saved in _load_queue():
+            if not isinstance(saved, dict) or not saved.get('id') or not saved.get('url'):
+                continue
+            if saved.get('status') == 'completed':
+                continue
+            job = dict(saved)
+            if job.get('status') == 'active':
+                job.update({'status': 'waiting', 'stage': '等待续传', 'progress': 0})
+            job.setdefault('output_dir', str(self.output_dir))
+            job.setdefault('attempts', 0)
+            self.jobs[job['id']] = job
+            self.job_order.append(job['id'])
+            self.cancel_events[job['id']] = threading.Event()
+            if job.get('status') == 'waiting':
+                self.pending_job_ids.append(job['id'])
+
+    def _persist_jobs(self) -> None:
+        safe_keys = {
+            'id', 'url', 'title', 'stage', 'status', 'progress', 'output_dir',
+            'mode', 'video_path', 'history_id', 'attempts', 'video_id',
+            'temporary_file', 'meta', 'result',
+        }
+        items = [
+            {key: value for key, value in self.jobs[job_id].items() if key in safe_keys}
+            for job_id in self.job_order if job_id in self.jobs
+        ]
+        signature = tuple((item.get('id'), item.get('status'), item.get('mode')) for item in items)
+        now = time.monotonic()
+        if signature == self._last_queue_signature and items and now - self._last_queue_persist < 0.5:
+            return
+        try:
+            _save_queue(items)
+            self._last_queue_signature = signature
+            self._last_queue_persist = now
+        except OSError:
+            pass
 
     def _build(self):
         root = QWidget(); root.setObjectName('root'); self.setCentralWidget(root)
@@ -1239,9 +1316,14 @@ class MainWindow(QMainWindow):
             job['url'] for job in self.jobs.values()
             if job.get('status') in {'waiting', 'active'}
         }
+        completed_urls = {
+            (entry.get('metadata') or {}).get('source_url')
+            for entry in _history()
+            if Path(entry.get('video_path', '')).is_file()
+        }
         added = 0
         for url in urls:
-            if url in existing_urls:
+            if url in existing_urls or url in completed_urls:
                 continue
             job_id = uuid.uuid4().hex
             self.jobs[job_id] = {'id': job_id, 'url': url, 'title': url, 'stage': '等待下载', 'status': 'waiting', 'progress': 0, 'output_dir': str(self.output_dir)}
@@ -1251,6 +1333,8 @@ class MainWindow(QMainWindow):
         self._start_pending_jobs()
         if added:
             self._show_hint(f'已加入 {added} 个链接，默认同时下载 {self.max_parallel_downloads} 个。')
+        elif any(url in completed_urls for url in urls):
+            self._show_hint('该链接已经下载完成，可在“最近下载”中打开。')
         else:
             self._show_hint('这些链接已经在下载队列中。')
 
@@ -1271,11 +1355,24 @@ class MainWindow(QMainWindow):
         def report(data): self.events.progress.emit(job_id, data)
         try:
             output_dir = Path(job['output_dir']); output_dir.mkdir(parents=True, exist_ok=True)
-            result = download_video(
-                job['url'], str(output_dir),
-                progress_callback=report,
-                cancel_callback=self.cancel_events[job_id].is_set,
-            )
+            if job.get('mode') == 'retry_audio':
+                result = retry_audio(
+                    job['url'], job['video_path'],
+                    progress_callback=report,
+                    cancel_callback=self.cancel_events[job_id].is_set,
+                )
+            elif job.get('mode') == 'retry_subtitle':
+                result = retry_subtitle(
+                    job['url'], job['output_dir'],
+                    progress_callback=report,
+                    cancel_callback=self.cancel_events[job_id].is_set,
+                )
+            else:
+                result = download_video(
+                    job['url'], str(output_dir),
+                    progress_callback=report,
+                    cancel_callback=self.cancel_events[job_id].is_set,
+                )
         except Exception as exc:
             result = {'success': False, 'error': f'无法保存或下载视频：{exc}'}
         self.events.finished.emit(job_id, result)
@@ -1287,6 +1384,10 @@ class MainWindow(QMainWindow):
         job['stage'] = data.get('stage', '正在下载')
         if 'progress' in data:
             job['progress'] = int(data['progress']) if data['progress'] is not None else None
+        if data.get('attempt'):
+            job['attempts'] = int(data['attempt'])
+        if data.get('temporary_file'):
+            job['temporary_file'] = data['temporary_file']
         self._render_jobs()
 
     def _finished(self, job_id: str, result: dict):
@@ -1294,6 +1395,12 @@ class MainWindow(QMainWindow):
         self.cancel_events.pop(job_id, None)
         if not job:
             self._start_pending_jobs(); return
+        if job.get('mode') == 'retry_audio':
+            self._finish_audio_retry(job_id, job, result)
+            return
+        if job.get('mode') == 'retry_subtitle':
+            self._finish_subtitle_retry(job_id, job, result)
+            return
         if result.get('cancelled'):
             self.jobs.pop(job_id, None)
             self.job_order = [item for item in self.job_order if item != job_id]
@@ -1301,10 +1408,20 @@ class MainWindow(QMainWindow):
             self._show_hint('下载已取消。')
             self._render_jobs(); self._start_pending_jobs(); return
         if not result.get('success'):
-            job.update({'status': 'failed', 'stage': '下载失败', 'progress': 0})
-            self._show_hint(result.get('error', '无法下载该链接'), error=True)
+            failure = result.get('failure') or {}
+            message = _failure_display(result)
+            job.update({
+                'status': 'failed',
+                'stage': f"{failure.get('failed_stage') or '下载'}失败",
+                'progress': 0,
+                'meta': message,
+                'result': result,
+            })
+            self._show_hint(message, error=True)
             self._render_jobs(); self._start_pending_jobs(); return
         metadata = dict(result.get('metadata') or {}); title = metadata.get('title') or Path(result['video_path']).stem
+        metadata['source_url'] = job.get('url', '')
+        metadata['subtitle_status'] = result.get('subtitle_status', 'unavailable')
         compatibility = result.get('compatibility') or {}; compatibility_status = compatibility.get('status')
         if compatibility_status == 'missing_audio':
             metadata['audio_status'] = 'missing'
@@ -1367,6 +1484,7 @@ class MainWindow(QMainWindow):
             if job:
                 self.task_list.addWidget(self._job_row(job))
         self.task_list.addStretch()
+        self._persist_jobs()
 
     def _job_row(self, job: dict) -> QFrame:
         row = QFrame(); row.setObjectName('jobRow')
@@ -1394,8 +1512,25 @@ class MainWindow(QMainWindow):
         cancel = QPushButton('取消')
         cancel.setObjectName('removeJobButton')
         cancel.clicked.connect(lambda _checked=False, job_id=job['id']: self.cancel_job(job_id))
-        content.addWidget(cancel, 0, Qt.AlignmentFlag.AlignRight)
+        if job.get('status') == 'failed' and job.get('result'):
+            report_button = QPushButton('复制诊断')
+            report_button.setObjectName('jobButton')
+            report_button.setAccessibleName('复制下载诊断报告')
+            report_button.clicked.connect(
+                lambda _checked=False, job_id=job['id']: self.copy_job_diagnostics(job_id)
+            )
+            content.addWidget(report_button, 0, Qt.AlignmentFlag.AlignRight)
+        else:
+            content.addWidget(cancel, 0, Qt.AlignmentFlag.AlignRight)
         return row
+
+    def copy_job_diagnostics(self, job_id: str) -> None:
+        from lib.download_diagnostics import diagnostic_report
+
+        job = self.jobs.get(job_id) or {}
+        result = job.get('result') or {}
+        QApplication.clipboard().setText(diagnostic_report(result))
+        self._show_hint('诊断报告已复制，敏感信息已隐藏。')
 
     def cancel_job(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
@@ -1435,7 +1570,9 @@ class MainWindow(QMainWindow):
             if entry.get('knowledge_base'):
                 status = f"已加入知识库 · {entry.get('category', '其他')}"
             elif (entry.get('metadata') or {}).get('audio_status') == 'missing':
-                status = '无音频 · 右键加入知识库'
+                status = '画面已保存，音频获取失败 · 右键重试音频'
+            elif (entry.get('metadata') or {}).get('subtitle_status') in {'failed', 'unavailable'}:
+                status = '视频完成／字幕失败 · 右键重试字幕'
             else:
                 status = '右键加入知识库'
             if entry.get('id') in self._knowledge_add_ids:
@@ -1455,8 +1592,12 @@ class MainWindow(QMainWindow):
         self.history.setCurrentItem(item)
         menu = QMenu(self)
         open_folder = menu.addAction('打开视频所在文件夹')
-        add_to_knowledge = menu.addAction('加入知识库')
         entry = item.data(Qt.ItemDataRole.UserRole)
+        audio_missing = isinstance(entry, dict) and (entry.get('metadata') or {}).get('audio_status') == 'missing'
+        retry_audio_action = menu.addAction('重试音频') if audio_missing else None
+        subtitle_failed = isinstance(entry, dict) and (entry.get('metadata') or {}).get('subtitle_status') in {'failed', 'unavailable'}
+        retry_subtitle_action = menu.addAction('重试字幕') if subtitle_failed else None
+        add_to_knowledge = menu.addAction('加入知识库')
         already_added = isinstance(entry, dict) and entry.get('knowledge_base')
         adding = isinstance(entry, dict) and entry.get('id') in self._knowledge_add_ids
         if already_added:
@@ -1471,10 +1612,121 @@ class MainWindow(QMainWindow):
         selected = menu.exec(self.history.viewport().mapToGlobal(point))
         if selected == open_folder:
             self.open_history_folder()
+        elif retry_audio_action is not None and selected == retry_audio_action:
+            self.retry_history_audio()
+        elif retry_subtitle_action is not None and selected == retry_subtitle_action:
+            self.retry_history_subtitle()
         elif selected == add_to_knowledge:
             self.add_history_to_knowledge_base()
         elif selected == delete_file:
             self.delete_history_with_file()
+
+    def retry_history_audio(self) -> None:
+        entry = self._current_history_entry()
+        if not entry:
+            return
+        video_path = Path(entry.get('video_path', ''))
+        source_url = (entry.get('metadata') or {}).get('source_url') or (entry.get('metadata') or {}).get('webpage_url')
+        if not video_path.is_file():
+            self._show_hint('已保存的画面文件不存在，无法补音频。', error=True)
+            return
+        if not source_url:
+            self._show_hint('旧记录没有来源链接，无法单独补音频。', error=True)
+            return
+        job_id = uuid.uuid4().hex
+        self.jobs[job_id] = {
+            'id': job_id, 'url': source_url, 'title': entry.get('title', source_url),
+            'stage': '等待补音频', 'status': 'waiting', 'progress': 0,
+            'output_dir': str(video_path.parent), 'video_path': str(video_path),
+            'history_id': entry['id'], 'mode': 'retry_audio',
+        }
+        self.cancel_events[job_id] = threading.Event()
+        self.job_order.append(job_id); self.pending_job_ids.append(job_id)
+        self.task_card.show(); self.empty_queue.hide()
+        self._show_hint('已加入音频重试，只会获取音频，不会重复下载画面。')
+        self._start_pending_jobs()
+
+    def _finish_audio_retry(self, job_id: str, job: dict, result: dict) -> None:
+        if result.get('cancelled'):
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self._show_hint('音频重试已取消。')
+        elif result.get('success'):
+            entries = _history()
+            current = next((item for item in entries if item.get('id') == job.get('history_id')), {})
+            metadata = dict(current.get('metadata') or {})
+            metadata['audio_status'] = 'present'
+            _update_history_entry(job['history_id'], {
+                'metadata': metadata, 'size': result.get('size', current.get('size', 0))
+            })
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self._load_history()
+            self._show_hint('音频已补全，画面没有重复下载。')
+        else:
+            failure = result.get('failure') or {}
+            job.update({
+                'status': 'failed', 'stage': '音频下载失败', 'progress': 0,
+                'meta': f"{failure.get('reason') or result.get('error', '补音频失败')} {failure.get('suggested_action') or ''}",
+                'result': result,
+            })
+            self._show_hint(job['meta'], error=True)
+        if not self.jobs:
+            self.task_card.hide(); self.empty_queue.show()
+        self._render_jobs(); self._start_pending_jobs()
+
+    def retry_history_subtitle(self) -> None:
+        entry = self._current_history_entry()
+        if not entry:
+            return
+        video_path = Path(entry.get('video_path', ''))
+        source_url = (entry.get('metadata') or {}).get('source_url') or (entry.get('metadata') or {}).get('webpage_url')
+        if not video_path.is_file() or not source_url:
+            self._show_hint('视频文件或来源链接不存在，无法重试字幕。', error=True)
+            return
+        job_id = uuid.uuid4().hex
+        self.jobs[job_id] = {
+            'id': job_id, 'url': source_url, 'title': entry.get('title', source_url),
+            'stage': '等待补字幕', 'status': 'waiting', 'progress': 0,
+            'output_dir': str(video_path.parent), 'video_path': str(video_path),
+            'history_id': entry['id'], 'mode': 'retry_subtitle',
+        }
+        self.cancel_events[job_id] = threading.Event()
+        self.job_order.append(job_id); self.pending_job_ids.append(job_id)
+        self.task_card.show(); self.empty_queue.hide()
+        self._show_hint('已加入字幕重试，不会重新下载视频或音频。')
+        self._start_pending_jobs()
+
+    def _finish_subtitle_retry(self, job_id: str, job: dict, result: dict) -> None:
+        if result.get('success'):
+            entries = _history()
+            current = next((item for item in entries if item.get('id') == job.get('history_id')), {})
+            metadata = dict(current.get('metadata') or {})
+            metadata['subtitle_status'] = 'completed'
+            _update_history_entry(job['history_id'], {
+                'metadata': metadata,
+                'subtitle_path': result.get('subtitle_path'),
+                'subtitle_text': (result.get('subtitle_text') or '')[:12000],
+            })
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self._load_history()
+            self._show_hint('字幕已补全，媒体文件没有重复下载。')
+        elif result.get('cancelled'):
+            self.jobs.pop(job_id, None)
+            self.job_order = [item for item in self.job_order if item != job_id]
+            self._show_hint('字幕重试已取消。')
+        else:
+            failure = result.get('failure') or {}
+            job.update({
+                'status': 'failed', 'stage': '字幕下载失败', 'progress': 0,
+                'meta': f"{failure.get('reason') or result.get('error', '字幕获取失败')} {failure.get('suggested_action') or ''}",
+                'result': result,
+            })
+            self._show_hint(job['meta'], error=True)
+        if not self.jobs:
+            self.task_card.hide(); self.empty_queue.show()
+        self._render_jobs(); self._start_pending_jobs()
 
     def add_history_to_knowledge_base(self):
         entry = self._current_history_entry()

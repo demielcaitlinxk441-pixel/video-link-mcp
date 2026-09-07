@@ -158,7 +158,11 @@ def _download_file(
     except DownloadCancelled:
         return {'success': False, 'error': '下载已取消', 'cancelled': True}
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        return {
+            'success': False, 'error': str(e),
+            'attempts': getattr(e, 'attempts', 1),
+            'http_status': getattr(e, 'status', None),
+        }
 
 
 def _merge_audio(video_path: str, audio_path: str, ffmpeg_path: str) -> bool:

@@ -22,6 +22,10 @@ class DesktopAppTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.queue_load = patch('desktop_app._load_queue', return_value=[])
+        self.queue_save = patch('desktop_app._save_queue')
+        self.queue_load.start(); self.queue_save.start()
+        self.addCleanup(self.queue_load.stop); self.addCleanup(self.queue_save.stop)
         self.window = desktop_app.MainWindow()
         self.addCleanup(self.window.close)
 
@@ -236,6 +240,114 @@ class DesktopAppTests(unittest.TestCase):
         self.assertFalse(self.window.hint.isVisible())
         self.assertEqual(self.window.hint.text(), '')
         self.assertFalse(hasattr(self.window, 'delete_history_button'))
+
+    def test_audio_retry_reuses_saved_video_and_does_not_queue_full_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'silent.mp4'
+            video.write_bytes(b'video')
+            record = {
+                'id': 'silent-1', 'title': '无声视频', 'video_path': str(video),
+                'metadata': {'audio_status': 'missing', 'source_url': 'https://example.com/video'},
+            }
+            with patch('desktop_app._history', return_value=[record]):
+                self.window._load_history()
+                self.window.history.setCurrentRow(0)
+                with patch('desktop_app.threading.Thread') as thread:
+                    self.window.retry_history_audio()
+
+            job = next(iter(self.window.jobs.values()))
+            self.assertEqual(job['mode'], 'retry_audio')
+            self.assertEqual(job['video_path'], str(video))
+            self.assertEqual(job['url'], 'https://example.com/video')
+            self.assertEqual(thread.call_count, 1)
+
+    def test_subtitle_retry_does_not_queue_media_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'video.mp4'
+            video.write_bytes(b'video')
+            record = {
+                'id': 'subtitle-1', 'title': '字幕失败视频', 'video_path': str(video),
+                'metadata': {'subtitle_status': 'failed', 'source_url': 'https://example.com/video'},
+            }
+            with patch('desktop_app._history', return_value=[record]):
+                self.window._load_history()
+                self.window.history.setCurrentRow(0)
+                with patch('desktop_app.threading.Thread') as thread:
+                    self.window.retry_history_subtitle()
+
+            job = next(iter(self.window.jobs.values()))
+            self.assertEqual(job['mode'], 'retry_subtitle')
+            self.assertEqual(job['output_dir'], directory)
+            self.assertEqual(thread.call_count, 1)
+
+    def test_completed_source_url_is_not_downloaded_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'done.mp4'
+            video.write_bytes(b'video')
+            record = {
+                'id': 'done-1', 'title': '完成视频', 'video_path': str(video),
+                'metadata': {'source_url': 'https://example.com/done'},
+            }
+            self.window.url.setPlainText('https://example.com/done')
+            with patch('desktop_app._history', return_value=[record]), \
+                 patch('desktop_app.threading.Thread') as thread:
+                self.window.start_download()
+
+            self.assertEqual(self.window.jobs, {})
+            thread.assert_not_called()
+            self.assertIn('已经下载完成', self.window.hint.text())
+
+    def test_interrupted_and_failed_jobs_restore_without_completed_jobs(self):
+        saved = [
+            {
+                'id': 'active-1', 'url': 'https://example.com/a', 'status': 'active',
+                'stage': '正在下载', 'output_dir': 'C:/downloads',
+                'temporary_file': 'C:/downloads/a.mp4.part', 'attempts': 2,
+            },
+            {
+                'id': 'failed-1', 'url': 'https://example.com/b', 'status': 'failed',
+                'stage': '视频下载失败', 'output_dir': 'C:/downloads', 'attempts': 3,
+            },
+            {'id': 'done-1', 'url': 'https://example.com/c', 'status': 'completed'},
+        ]
+        self.window.jobs.clear(); self.window.job_order.clear()
+        self.window.pending_job_ids.clear(); self.window.cancel_events.clear()
+        with patch('desktop_app._load_queue', return_value=saved):
+            self.window._restore_jobs()
+
+        self.assertEqual(set(self.window.jobs), {'active-1', 'failed-1'})
+        self.assertEqual(self.window.jobs['active-1']['status'], 'waiting')
+        self.assertEqual(self.window.jobs['active-1']['temporary_file'], 'C:/downloads/a.mp4.part')
+        self.assertEqual(self.window.pending_job_ids, ['active-1'])
+        self.assertEqual(self.window.jobs['failed-1']['status'], 'failed')
+
+    def test_queue_persistence_keeps_resume_metadata(self):
+        self.window.jobs = {
+            'job-1': {
+                'id': 'job-1', 'url': 'https://example.com/video', 'status': 'active',
+                'stage': '视频下载', 'output_dir': 'C:/downloads', 'attempts': 2,
+                'video_id': 'abc', 'temporary_file': 'C:/downloads/a.part',
+            }
+        }
+        self.window.job_order = ['job-1']
+        with patch('desktop_app._save_queue') as save:
+            self.window._persist_jobs()
+        persisted = save.call_args.args[0][0]
+        self.assertEqual(persisted['video_id'], 'abc')
+        self.assertEqual(persisted['attempts'], 2)
+        self.assertEqual(persisted['temporary_file'], 'C:/downloads/a.part')
+
+    def test_failure_message_shows_reason_completed_content_and_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'silent.mp4'
+            video.write_bytes(b'video')
+            message = desktop_app._failure_display({
+                'video_path': str(video),
+                'failure': {'reason': '音频获取失败。', 'suggested_action': '重试音频。'},
+            })
+        self.assertIn('问题原因：音频获取失败', message)
+        self.assertIn('已完成内容：画面已保存', message)
+        self.assertIn('处理办法：重试音频', message)
 
 
 

@@ -11,6 +11,34 @@ class DownloadCancelled(Exception):
     """Raised when the caller cancels an active download."""
 
 
+class DownloadHTTPError(OSError):
+    """HTTP failure with stable status and attempt metadata."""
+
+    def __init__(self, status: int, attempts: int, message: str):
+        super().__init__(f'HTTP Error {status}: {message}')
+        self.status = status
+        self.attempts = attempts
+
+
+def _retry_delay(status: int | None, attempt: int) -> int:
+    if status == 429:
+        return (5, 15, 30)[min(attempt - 1, 2)]
+    return min(2 ** attempt, 16)
+
+
+def _wait_before_retry(seconds: int, *, attempt: int, max_attempts: int,
+                       progress_callback=None, cancel_callback=None) -> None:
+    for remaining in range(seconds, 0, -1):
+        if cancel_callback and cancel_callback():
+            raise DownloadCancelled('下载已取消')
+        if progress_callback:
+            progress_callback({
+                'stage': f'等待重试：还剩 {remaining} 秒（{attempt + 1}/{max_attempts}）',
+                'progress': None, 'retry_in': remaining, 'attempt': attempt + 1,
+            })
+        time.sleep(1)
+
+
 def _total_size(response, existing: int) -> int:
     content_range = response.headers.get('Content-Range', '')
     if '/' in content_range:
@@ -33,7 +61,7 @@ def download_with_resume(
     progress_callback: Optional[Callable[[dict], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
     stage: str = '正在下载',
-    timeout: int = 120,
+    timeout: int = 30,
     max_attempts: int = 3,
 ) -> int:
     """Download to a .part file, retry failures, and resume with HTTP Range."""
@@ -76,6 +104,7 @@ def download_with_resume(
                                 'total_bytes': total,
                                 'attempt': attempt,
                                 'resumed': resumed,
+                                'temporary_file': part_path,
                             })
                 if total and downloaded < total:
                     raise OSError(
@@ -85,15 +114,24 @@ def download_with_resume(
             return downloaded
         except DownloadCancelled:
             raise
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            status = int(exc.code)
+            if status in {401, 403, 412}:
+                raise DownloadHTTPError(status, attempt, '授权失败，请重新完成平台授权') from exc
+            retryable = status == 429 or status in {500, 502, 503, 504}
+            if not retryable or attempt >= max_attempts:
+                raise DownloadHTTPError(status, attempt, str(exc.reason or exc)) from exc
+            _wait_before_retry(
+                _retry_delay(status, attempt), attempt=attempt, max_attempts=max_attempts,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+            )
         except (OSError, urllib.error.URLError) as exc:
             last_error = exc
             if attempt < max_attempts:
-                if progress_callback:
-                    progress_callback({
-                        'stage': f'网络中断，正在重试（{attempt + 1}/{max_attempts}）',
-                        'progress': None,
-                        'attempt': attempt + 1,
-                    })
-                time.sleep(min(attempt, 2))
+                _wait_before_retry(
+                    _retry_delay(None, attempt), attempt=attempt, max_attempts=max_attempts,
+                    progress_callback=progress_callback, cancel_callback=cancel_callback,
+                )
 
     raise OSError(f'下载重试 {max_attempts} 次后仍然失败：{last_error}')

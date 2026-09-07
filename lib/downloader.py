@@ -32,6 +32,16 @@ _MOBILE_DOUYIN_UA = (
     'Chrome/130.0 Mobile Safari/537.36'
 )
 
+# Prefer a Windows-friendly H.264/AAC MP4 up to 1080p. Fall back to the
+# best <=1080p streams, then unrestricted streams only when necessary.
+DEFAULT_FORMAT_SELECTOR = (
+    'bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+'
+    'bestaudio[acodec^=mp4a]/'
+    'best[height<=1080][vcodec^=avc1][acodec^=mp4a][ext=mp4]/'
+    'bestvideo[height<=1080]+bestaudio/best[height<=1080]/'
+    'bestvideo+bestaudio/best'
+)
+
 
 def _hidden_process_kwargs() -> dict:
     """Keep helper tools such as ffmpeg from opening a console on Windows."""
@@ -144,17 +154,30 @@ def _download_douyin_mobile(
                 os.remove(target)
             except OSError:
                 pass
-        return {'success': False, 'error': f'抖音移动下载失败：{exc}'}
+        return {
+            'success': False, 'error': f'抖音移动下载失败：{exc}',
+            'attempts': getattr(exc, 'attempts', 1),
+            'http_status': getattr(exc, 'status', None),
+        }
+
+
+def _audio_track_state(path: str, ffmpeg_path: Optional[str]) -> str:
+    """Return present, missing, or inspection_failed for a media file."""
+    ffprobe_path = _find_ffprobe(ffmpeg_path)
+    if not ffprobe_path:
+        return 'inspection_failed'
+    media = _probe_media(path, ffprobe_path)
+    if media is None:
+        return 'inspection_failed'
+    return 'present' if any(
+        stream.get('codec_type') == 'audio'
+        for stream in media.get('streams', [])
+    ) else 'missing'
 
 
 def _contains_audio_track(path: str, ffmpeg_path: Optional[str]) -> bool:
-    """Return whether a downloaded direct MP4 includes an audio stream."""
-    ffprobe_path = _find_ffprobe(ffmpeg_path)
-    media = _probe_media(path, ffprobe_path) if ffprobe_path else None
-    return any(
-        stream.get('codec_type') == 'audio'
-        for stream in (media or {}).get('streams', [])
-    )
+    """Backward-compatible boolean audio check."""
+    return _audio_track_state(path, ffmpeg_path) == 'present'
 
 
 def _handle_wechat_channels_download(url: str, output_dir: str, **kwargs) -> dict:
@@ -345,26 +368,51 @@ def _media_duration(media: Optional[dict]) -> float:
 
 
 def _transcode_to_compatible_mp4(source_path: str, target_path: str,
-                                 ffmpeg_path: str) -> bool:
+                                 ffmpeg_path: str, *, duration: float = 0,
+                                 report_progress: Optional[Callable[[dict], None]] = None,
+                                 cancel_callback: Optional[Callable[[], bool]] = None) -> bool:
     """Create an H.264/AAC/yuv420p MP4 copy without touching the source."""
     temporary_path = f'{target_path}.part.mp4'
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 ffmpeg_path, '-y', '-i', source_path,
                 '-map', '0:v:0', '-map', '0:a?',
                 '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-                '-movflags', '+faststart', temporary_path,
+                '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats',
+                temporary_path,
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True,
             **_hidden_process_kwargs(),
         )
-        if result.returncode != 0 or not os.path.exists(temporary_path):
+        while True:
+            if cancel_callback and cancel_callback():
+                process.terminate()
+                process.wait(timeout=10)
+                raise DownloadCancelled('兼容转换已取消')
+            line = process.stdout.readline() if process.stdout else ''
+            if line.startswith('out_time_ms=') and duration > 0 and report_progress:
+                try:
+                    elapsed = int(line.split('=', 1)[1]) / 1_000_000
+                    percent = min(99, elapsed * 100 / duration)
+                    remaining = max(0, duration - elapsed)
+                    report_progress({
+                        'stage': '正在转换为通用 MP4', 'progress': round(percent, 1),
+                        'eta': round(remaining),
+                    })
+                except ValueError:
+                    pass
+            if not line and process.poll() is not None:
+                break
+        if process.returncode != 0 or not os.path.exists(temporary_path):
             return False
         os.replace(temporary_path, target_path)
         return True
-    except (FileNotFoundError, OSError):
+    except DownloadCancelled:
+        raise
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return False
     finally:
         if os.path.exists(temporary_path):
@@ -375,7 +423,8 @@ def _transcode_to_compatible_mp4(source_path: str, target_path: str,
 
 
 def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
-                             report_progress: Callable[[dict], None]) -> dict:
+                             report_progress: Callable[[dict], None],
+                             cancel_callback: Optional[Callable[[], bool]] = None) -> dict:
     """Convert only non-compatible files, then verify the preferred output decodes."""
     if not result.get('success') or not result.get('video_path'):
         return result
@@ -391,6 +440,12 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
 
     report_progress({'stage': '正在检查播放兼容性'})
     source_media = _probe_media(source_path, ffprobe_path)
+    if source_media is None:
+        result['compatibility'] = {
+            'status': 'inspection_failed',
+            'message': '媒体轨道检查失败，无法确认视频是否包含音频。',
+        }
+        return result
     source_streams = (source_media or {}).get('streams') or []
     if not any(stream.get('codec_type') == 'audio' for stream in source_streams):
         result['compatibility'] = {
@@ -420,7 +475,11 @@ def _ensure_compatible_video(result: dict, ffmpeg_path: Optional[str],
 
     target_path = _compatible_output_path(source_path)
     report_progress({'stage': '正在转换为通用 MP4'})
-    if not _transcode_to_compatible_mp4(source_path, target_path, ffmpeg_path):
+    if not _transcode_to_compatible_mp4(
+        source_path, target_path, ffmpeg_path,
+        duration=_media_duration(source_media), report_progress=report_progress,
+        cancel_callback=cancel_callback,
+    ):
         result['compatibility'] = {
             'status': 'conversion_failed',
             'message': '兼容 MP4 转换失败，已保留原始视频。',
@@ -522,6 +581,11 @@ def _build_ydl_opts(
 ) -> dict:
     """Merge cookie/proxy/ffmpeg options into yt-dlp options."""
     opts = dict(base_opts)
+    opts.setdefault('continuedl', True)
+    opts.setdefault('retries', 3)
+    opts.setdefault('fragment_retries', 3)
+    opts.setdefault('file_access_retries', 3)
+    opts.setdefault('socket_timeout', 30)
 
     if ffmpeg_path and ffmpeg_path != 'ffmpeg':
         opts['ffmpeg_location'] = os.path.dirname(ffmpeg_path)
@@ -684,7 +748,7 @@ def _find_video_file(base_without_ext: str, video_id: str,
     return None
 
 
-def download_video(
+def _download_video_impl(
     url: str,
     output_dir: str = None,
     prefer_subtitle_lang: str = 'zh-Hans,zh,en',
@@ -749,7 +813,7 @@ def download_video(
         result = _handle_wechat_channels_download(
             url, output_dir, yuanbao_cookie=yuanbao_cookie
         )
-        result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
+        result = _ensure_compatible_video(result, ffmpeg_path, report_progress, cancel_callback)
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
         return result
 
@@ -760,9 +824,10 @@ def download_video(
             url, output_dir, report_progress, cancel_callback, douyin_cookie
         )
         if mobile_result.get('success'):
-            if _contains_audio_track(mobile_result['video_path'], ffmpeg_path):
+            audio_state = _audio_track_state(mobile_result['video_path'], ffmpeg_path)
+            if audio_state in {'present', 'inspection_failed'}:
                 mobile_result = _ensure_compatible_video(
-                    mobile_result, ffmpeg_path, report_progress
+                    mobile_result, ffmpeg_path, report_progress, cancel_callback
                 )
                 report_progress({
                     'stage': '完成' if mobile_result.get('success') else '下载失败'
@@ -784,7 +849,7 @@ def download_video(
             progress_callback=report_progress, ffmpeg_path=ffmpeg_path,
             cancel_callback=cancel_callback,
         )
-        result = _ensure_compatible_video(result, ffmpeg_path, report_progress)
+        result = _ensure_compatible_video(result, ffmpeg_path, report_progress, cancel_callback)
         report_progress({'stage': '完成' if result.get('success') else '下载失败'})
         return result
 
@@ -805,13 +870,13 @@ def download_video(
     )
 
     base_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': DEFAULT_FORMAT_SELECTOR,
         'merge_output_format': 'mp4',
         'outtmpl': output_template,
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': lang_list,
-        'subtitlesformat': 'vtt/best',
+        # Subtitles are fetched only after media is safely saved. A subtitle
+        # rate-limit or malformed file must never discard/re-download media.
+        'writesubtitles': False,
+        'writeautomaticsub': False,
         'quiet': True,
         'no_warnings': True,
         'noprogress': True,
@@ -844,6 +909,7 @@ def download_video(
                     'total_bytes': total,
                     'speed': data.get('speed'),
                     'eta': data.get('eta'),
+                    'temporary_file': data.get('tmpfilename') or data.get('filename'),
                 })
             elif status == 'finished':
                 report_progress({'stage': '正在合并音视频', 'progress': 100})
@@ -873,6 +939,7 @@ def download_video(
                 'webpage_url': info.get('webpage_url', url),
                 'extractor': info.get('extractor_key', ''),
                 'thumbnail': info.get('thumbnail', ''),
+                'video_id': video_id,
             }
 
             base_filename = ydl.prepare_filename(info)
@@ -881,15 +948,18 @@ def download_video(
             # Locate downloaded files
             video_path = _find_video_file(base_without_ext, video_id, output_dir)
 
-            sub_path, sub_lang, sub_is_auto = _find_subtitle(
-                base_without_ext, video_id, output_dir, lang_list
+            subtitle_result = _retry_subtitle_impl(
+                url, output_dir, lang_list,
+                cookies_from_browser=cookies_from_browser,
+                cookies_file=cookies_file, proxy=proxy,
+                bilibili_cookie=bilibili_cookie, douyin_cookie=douyin_cookie,
+                progress_callback=report_progress,
+                cancel_callback=cancel_callback,
             )
-
-            # Parse subtitle text
-            subtitle_text = None
-            if sub_path:
-                from .subtitle_parser import parse_subtitle
-                subtitle_text = parse_subtitle(sub_path)
+            sub_path = subtitle_result.get('subtitle_path')
+            subtitle_text = subtitle_result.get('subtitle_text')
+            sub_lang = subtitle_result.get('subtitle_lang')
+            sub_is_auto = subtitle_result.get('subtitle_is_auto', False)
 
             # Calculate file size
             file_size = 0
@@ -905,13 +975,16 @@ def download_video(
                 'subtitle_lang': sub_lang,
                 'subtitle_is_auto': sub_is_auto,
                 'has_subtitle': sub_path is not None and subtitle_text is not None,
+                'subtitle_status': subtitle_result.get('subtitle_status', 'failed'),
+                'subtitle_failure': subtitle_result.get('failure'),
                 'metadata': metadata,
                 'output_dir': output_dir,
                 'ffmpeg_found': ffmpeg_path is not None,
+                'download_method': 'yt-dlp',
                 'cookies_from_browser': cookies_from_browser,
                 'cookies_file': cookies_file,
                 'proxy': proxy,
-            }, ffmpeg_path, report_progress)
+            }, ffmpeg_path, report_progress, cancel_callback)
 
     except DownloadCancelled:
         return {'success': False, 'error': '下载已取消', 'cancelled': True}
@@ -974,7 +1047,7 @@ def download_video(
                 'cookies_from_browser': cookies_from_browser,
                 'cookies_file': cookies_file,
                 'proxy': proxy,
-            }, ffmpeg_path, report_progress)
+            }, ffmpeg_path, report_progress, cancel_callback)
 
         # Both yt-dlp and Playwright failed
         return {
@@ -985,3 +1058,249 @@ def download_video(
             'cookies_file': cookies_file,
             'proxy': proxy,
         }
+
+
+def download_video(*args, **kwargs) -> dict:
+    """Download media and return a backward-compatible structured result."""
+    from .download_diagnostics import normalize_result
+
+    url = str(args[0] if args else kwargs.get('url', ''))
+    try:
+        return normalize_result(_download_video_impl(*args, **kwargs), url=url)
+    except Exception as exc:
+        return normalize_result({
+            'success': False,
+            'error': f'无法保存或下载视频：{exc}',
+            'download_method': 'internal',
+        }, url=url)
+
+
+def _retry_subtitle_impl(
+    url: str,
+    output_dir: str,
+    lang_list: list[str],
+    *,
+    cookies_from_browser: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+    proxy: Optional[str] = None,
+    bilibili_cookie: Optional[str] = None,
+    douyin_cookie: Optional[str] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """Fetch and parse subtitles without downloading any media streams."""
+    from .download_diagnostics import normalize_result
+
+    def report(payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(payload)
+            except Exception:
+                pass
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return normalize_result({
+            'success': False, 'error': 'yt-dlp 未安装，无法获取字幕。',
+            'failed_stage': '字幕下载', 'subtitle_status': 'failed',
+            'download_method': 'subtitle_retry',
+        }, url=url)
+
+    if cancel_callback and cancel_callback():
+        return normalize_result({'success': False, 'error': '下载已取消', 'cancelled': True}, url=url)
+
+    template = os.path.join(output_dir, '%(title).80s [%(id)s].%(ext)s')
+    opts = {
+        'skip_download': True,
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': lang_list,
+        'subtitlesformat': 'vtt/best',
+        'outtmpl': template,
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'overwrites': True,
+    }
+    if _is_bilibili(url) and bilibili_cookie:
+        opts['http_headers'] = {'Cookie': bilibili_cookie, 'Referer': 'https://www.bilibili.com/'}
+    if _is_douyin(url) and douyin_cookie:
+        opts['http_headers'] = {
+            'Cookie': douyin_cookie, 'Referer': 'https://www.douyin.com/',
+            'User-Agent': _MOBILE_DOUYIN_UA,
+        }
+    try:
+        report({'stage': '正在获取字幕'})
+        with yt_dlp.YoutubeDL(_build_ydl_opts(
+            opts, find_ffmpeg(), cookies_from_browser, cookies_file, proxy
+        )) as ydl:
+            info = ydl.extract_info(normalize_url(url), download=True)
+            video_id = info.get('id', '')
+            base_without_ext = os.path.splitext(ydl.prepare_filename(info))[0]
+        sub_path, sub_lang, sub_is_auto = _find_subtitle(
+            base_without_ext, video_id, output_dir, lang_list
+        )
+        if not sub_path:
+            return normalize_result({
+                'success': False, 'error': '该视频没有可用字幕。',
+                'failed_stage': '字幕下载', 'subtitle_status': 'unavailable',
+                'download_method': 'subtitle_retry',
+            }, url=url)
+        from .subtitle_parser import parse_subtitle
+        subtitle_text = parse_subtitle(sub_path)
+        if subtitle_text is None:
+            raise ValueError('字幕格式无法解析')
+        return normalize_result({
+            'success': True, 'subtitle_path': sub_path,
+            'subtitle_text': subtitle_text, 'subtitle_lang': sub_lang,
+            'subtitle_is_auto': sub_is_auto, 'has_subtitle': True,
+            'subtitle_status': 'completed', 'download_method': 'subtitle_retry',
+            'artifacts': {'subtitle': sub_path},
+        }, url=url)
+    except Exception as exc:
+        return normalize_result({
+            'success': False, 'error': f'字幕获取失败：{exc}',
+            'failed_stage': '字幕下载', 'subtitle_status': 'failed',
+            'download_method': 'subtitle_retry',
+        }, url=url)
+
+
+def retry_subtitle(
+    url: str,
+    output_dir: str,
+    prefer_subtitle_lang: str = 'zh-Hans,zh,en',
+    **kwargs,
+) -> dict:
+    """Public subtitle-only retry operation; never downloads video or audio."""
+    lang_list = [item.strip() for item in prefer_subtitle_lang.split(',') if item.strip()]
+    return _retry_subtitle_impl(url, output_dir, lang_list, **kwargs)
+
+
+def retry_audio(
+    url: str,
+    video_path: str,
+    *,
+    cookies_from_browser: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+    proxy: Optional[str] = None,
+    bilibili_cookie: Optional[str] = None,
+    douyin_cookie: Optional[str] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """Download only an audio stream and losslessly mux it into saved video."""
+    from .download_diagnostics import normalize_result
+    from .playwright_downloader import _merge_audio
+
+    def report(payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(payload)
+            except Exception:
+                pass
+
+    if not video_path or not os.path.isfile(video_path):
+        return normalize_result({
+            'success': False,
+            'error': '已保存的画面文件不存在，无法单独补音频。',
+            'failed_stage': '音频下载',
+            'download_method': 'audio_retry',
+        }, url=url)
+
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return normalize_result({
+            'success': False,
+            'error': '未找到 FFmpeg，无法合并音频。',
+            'failed_stage': '音视频合并',
+            'download_method': 'audio_retry',
+        }, url=url)
+
+    if _is_bilibili(url) and not bilibili_cookie:
+        from .local_credentials import get_bilibili_cookie
+        bilibili_cookie = get_bilibili_cookie()
+    if _is_douyin(url) and not douyin_cookie:
+        from .local_credentials import get_douyin_cookie
+        douyin_cookie = get_douyin_cookie()
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return normalize_result({
+            'success': False, 'error': 'yt-dlp 未安装。',
+            'failed_stage': '音频下载', 'download_method': 'audio_retry',
+        }, url=url)
+
+    output_dir = os.path.dirname(os.path.abspath(video_path))
+    temp_template = os.path.join(output_dir, '.audio-retry-%(id)s.%(ext)s')
+    opts = {
+        'format': 'bestaudio[acodec!=none][vcodec=none]/bestaudio',
+        'outtmpl': temp_template,
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'overwrites': True,
+    }
+    if _is_bilibili(url) and bilibili_cookie:
+        opts['http_headers'] = {'Cookie': bilibili_cookie, 'Referer': 'https://www.bilibili.com/'}
+    if _is_douyin(url) and douyin_cookie:
+        opts['http_headers'] = {
+            'Cookie': douyin_cookie, 'Referer': 'https://www.douyin.com/',
+            'User-Agent': _MOBILE_DOUYIN_UA,
+        }
+
+    audio_path = None
+    try:
+        report({'stage': '正在重新解析音频'})
+        if cancel_callback and cancel_callback():
+            raise DownloadCancelled('下载已取消')
+        with yt_dlp.YoutubeDL(_build_ydl_opts(
+            opts, ffmpeg_path, cookies_from_browser, cookies_file, proxy
+        )) as ydl:
+            info = ydl.extract_info(normalize_url(url), download=True)
+            audio_path = ydl.prepare_filename(info)
+        if not audio_path or not os.path.isfile(audio_path):
+            candidates = sorted(glob.glob(os.path.join(output_dir, '.audio-retry-*')))
+            audio_path = candidates[-1] if candidates else None
+        if not audio_path or not os.path.isfile(audio_path):
+            raise OSError('音频文件未生成')
+        if cancel_callback and cancel_callback():
+            raise DownloadCancelled('下载已取消')
+        report({'stage': '正在合并音视频'})
+        if not _merge_audio(video_path, audio_path, ffmpeg_path):
+            return normalize_result({
+                'success': False, 'error': '音频已下载，但 FFmpeg 合并失败。',
+                'failed_stage': '音视频合并', 'video_path': video_path,
+                'download_method': 'audio_retry',
+            }, url=url)
+        state = _audio_track_state(video_path, ffmpeg_path)
+        if state != 'present':
+            return normalize_result({
+                'success': False,
+                'error': '合并完成后未检测到音轨。' if state == 'missing' else '合并后媒体检查失败。',
+                'failed_stage': '音视频合并', 'video_path': video_path,
+                'download_method': 'audio_retry',
+            }, url=url)
+        report({'stage': '音频补全完成', 'progress': 100})
+        return normalize_result({
+            'success': True, 'video_path': video_path,
+            'size': os.path.getsize(video_path),
+            'download_method': 'audio_retry',
+            'compatibility': {'status': 'audio_restored'},
+            'artifacts': {'video': video_path, 'audio': 'merged'},
+        }, url=url)
+    except DownloadCancelled:
+        return normalize_result({'success': False, 'error': '下载已取消', 'cancelled': True}, url=url)
+    except Exception as exc:
+        return normalize_result({
+            'success': False, 'error': f'单独补音频失败：{exc}',
+            'failed_stage': '音频下载', 'video_path': video_path,
+            'download_method': 'audio_retry',
+        }, url=url)
+    finally:
+        if audio_path and os.path.isfile(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass

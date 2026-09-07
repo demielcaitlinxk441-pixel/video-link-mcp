@@ -40,6 +40,8 @@ from mcp.server.fastmcp import FastMCP
 from lib.detector import detect_link_type as _detect_link_type
 from lib.downloader import download_video as _download_video
 from lib.downloader import get_video_info as _get_video_info
+from lib.downloader import retry_audio as _retry_audio
+from lib.downloader import retry_subtitle as _retry_subtitle
 from lib.transcriber import transcribe_audio as _transcribe_audio
 
 LOCAL_HTTP_HOST = '127.0.0.1'
@@ -217,6 +219,24 @@ def download_video(
     kwargs = _build_cookie_kwargs(cookies_from_browser, cookies_file, proxy, yuanbao_cookie)
     result = _download_video(url, output_dir or None, **kwargs)
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def retry_audio(url: str, video_path: str, cookies_from_browser: str = '',
+                cookies_file: str = '', proxy: str = '') -> str:
+    """Retry only the audio stage for an already saved silent video."""
+    kwargs = _build_cookie_kwargs(cookies_from_browser, cookies_file, proxy)
+    kwargs.pop('yuanbao_cookie', None)
+    return json.dumps(_retry_audio(url, video_path, **kwargs), ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def retry_subtitle(url: str, output_dir: str, cookies_from_browser: str = '',
+                   cookies_file: str = '', proxy: str = '') -> str:
+    """Retry only subtitles; never re-download video or audio."""
+    kwargs = _build_cookie_kwargs(cookies_from_browser, cookies_file, proxy)
+    kwargs.pop('yuanbao_cookie', None)
+    return json.dumps(_retry_subtitle(url, output_dir, **kwargs), ensure_ascii=False, indent=2)
 
 
 # ──────────────────────────────────────────────

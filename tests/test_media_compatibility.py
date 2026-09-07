@@ -1,4 +1,5 @@
 from pathlib import Path
+import io
 import sys
 import tempfile
 import unittest
@@ -67,7 +68,7 @@ class MediaCompatibilityTests(unittest.TestCase):
             source.write_bytes(b'old')
             result = {'success': True, 'video_path': str(source), 'size': 3}
 
-            def fake_transcode(_, target, __):
+            def fake_transcode(_, target, __, **_kwargs):
                 Path(target).write_bytes(b'converted')
                 return True
 
@@ -117,6 +118,27 @@ class MediaCompatibilityTests(unittest.TestCase):
         self.assertTrue(checked['compatibility']['audio_missing'])
         self.assertIn('未检测到音轨', checked['compatibility']['message'])
 
+    def test_media_inspection_failure_is_not_reported_as_missing_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'unknown.mp4'
+            source.write_bytes(b'video')
+            with patch('lib.downloader._find_ffprobe', return_value='ffprobe'), \
+                 patch('lib.downloader._probe_media', return_value=None):
+                checked = downloader._ensure_compatible_video(
+                    {'success': True, 'video_path': str(source)},
+                    'ffmpeg', lambda _: None,
+                )
+
+        self.assertEqual(checked['compatibility']['status'], 'inspection_failed')
+        self.assertNotIn('audio_missing', checked['compatibility'])
+
+    def test_audio_track_state_has_three_distinct_outcomes(self):
+        with patch('lib.downloader._find_ffprobe', return_value='ffprobe'), \
+             patch('lib.downloader._probe_media', side_effect=[H264_AAC_MP4, VIDEO_ONLY_MP4, None]):
+            self.assertEqual(downloader._audio_track_state('a.mp4', 'ffmpeg'), 'present')
+            self.assertEqual(downloader._audio_track_state('b.mp4', 'ffmpeg'), 'missing')
+            self.assertEqual(downloader._audio_track_state('c.mp4', 'ffmpeg'), 'inspection_failed')
+
     def test_decode_check_samples_the_start_and_end_of_long_videos(self):
         calls = []
 
@@ -147,7 +169,7 @@ class MediaCompatibilityTests(unittest.TestCase):
             source.write_bytes(b'old')
             result = {'success': True, 'video_path': str(source), 'size': 3}
 
-            def fake_transcode(_, target, __):
+            def fake_transcode(_, target, __, **_kwargs):
                 Path(target).write_bytes(b'converted')
                 return True
 
@@ -164,6 +186,50 @@ class MediaCompatibilityTests(unittest.TestCase):
             self.assertFalse(checked['compatibility']['source_removed'])
             self.assertTrue(source.is_file())
             self.assertTrue(Path(checked['video_path']).is_file())
+
+    def test_transcode_reports_progress_and_eta(self):
+        events = []
+
+        class Process:
+            returncode = 0
+
+            def __init__(self, command, **_kwargs):
+                Path(command[-1]).write_bytes(b'converted')
+                self.stdout = io.StringIO('out_time_ms=5000000\nprogress=end\n')
+
+            def poll(self): return 0 if self.stdout.tell() == len(self.stdout.getvalue()) else None
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            'lib.downloader.subprocess.Popen', Process
+        ):
+            target = str(Path(directory) / 'target.mp4')
+            converted = downloader._transcode_to_compatible_mp4(
+                'source.mp4', target, 'ffmpeg', duration=10,
+                report_progress=events.append,
+            )
+
+        self.assertTrue(converted)
+        self.assertEqual(events[0]['progress'], 50.0)
+        self.assertEqual(events[0]['eta'], 5)
+
+    def test_transcode_cancel_does_not_leave_final_file(self):
+        class Process:
+            returncode = None
+            stdout = io.StringIO('')
+
+            def __init__(self, *_args, **_kwargs): pass
+            def terminate(self): self.returncode = -1
+            def wait(self, timeout): return self.returncode
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            'lib.downloader.subprocess.Popen', Process
+        ):
+            target = str(Path(directory) / 'target.mp4')
+            with self.assertRaises(downloader.DownloadCancelled):
+                downloader._transcode_to_compatible_mp4(
+                    'source.mp4', target, 'ffmpeg', cancel_callback=lambda: True
+                )
+            self.assertFalse(Path(target).exists())
 
 
 if __name__ == '__main__':
