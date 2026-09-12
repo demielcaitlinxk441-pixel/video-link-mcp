@@ -8,7 +8,7 @@ from lib import local_credentials
 
 
 class LocalCredentialTests(unittest.TestCase):
-    def test_credentials_are_stored_separately_and_clear_independently(self):
+    def test_platform_credentials_are_stored_separately(self):
         with tempfile.TemporaryDirectory() as directory:
             credential_file = Path(directory) / 'credentials.json'
             with patch.object(local_credentials, 'APP_DIR', Path(directory)), \
@@ -18,20 +18,17 @@ class LocalCredentialTests(unittest.TestCase):
                 local_credentials.save_yuanbao_cookie('yuanbao-secret')
                 local_credentials.save_bilibili_cookie('bilibili-secret')
                 local_credentials.save_douyin_cookie('douyin-secret')
-                local_credentials.save_ai_api_key('ai-secret')
 
                 stored = json.loads(credential_file.read_text(encoding='utf-8'))
                 self.assertNotIn('yuanbao-secret', credential_file.read_text(encoding='utf-8'))
-                self.assertEqual(set(stored), {'yuanbao_cookie', 'bilibili_cookie', 'douyin_cookie', 'ai_api_key'})
+                self.assertEqual(set(stored), {'yuanbao_cookie', 'bilibili_cookie', 'douyin_cookie'})
                 self.assertEqual(local_credentials.get_yuanbao_cookie(), 'yuanbao-secret')
                 self.assertEqual(local_credentials.get_bilibili_cookie(), 'bilibili-secret')
                 self.assertEqual(local_credentials.get_douyin_cookie(), 'douyin-secret')
-                self.assertEqual(local_credentials.get_ai_api_key(), 'ai-secret')
 
-                local_credentials.clear_ai_api_key()
-                self.assertEqual(local_credentials.get_ai_api_key(), '')
+                local_credentials.clear_bilibili_cookie()
                 self.assertEqual(local_credentials.get_yuanbao_cookie(), 'yuanbao-secret')
-                self.assertEqual(local_credentials.get_bilibili_cookie(), 'bilibili-secret')
+                self.assertEqual(local_credentials.get_bilibili_cookie(), '')
                 self.assertEqual(local_credentials.get_douyin_cookie(), 'douyin-secret')
 
 

@@ -1,6 +1,6 @@
 # Video Link Analyzer
 
-一个本地优先的视频链接分析与下载工具，包含 MCP 服务和 Windows 桌面下载器。下载记录、Cookie、AI 配置等默认保存在本机，不应提交到仓库。
+一个本地优先的视频链接分析与下载工具，包含 MCP 服务和 Windows 桌面下载器。下载记录和 Cookie 默认保存在本机，不应提交到仓库。
 
 ## 快速开始
 
@@ -81,7 +81,7 @@ venv\Scripts\python.exe -m unittest discover -s tests
 
 不要提交真实 Cookie、API Key、`.env`、视频文件、虚拟环境、Node 依赖或 Android/iOS 构建产物。项目采用 MIT 许可证，详见 [LICENSE](LICENSE)。
 
-Windows 桌面版使用当前账户的 DPAPI 加密保存视频号授权和 AI API Key，明文密钥不会写入 `settings.json`。
+Windows 桌面版使用当前账户的 DPAPI 加密保存视频号、B 站和抖音授权信息，明文 Cookie 不会写入 `settings.json`。
 
 ## 许可证
 

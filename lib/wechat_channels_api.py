@@ -81,15 +81,8 @@ YUANBAO_HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
-    "t-userid": "b9575f6b0a8c4a55a08096904a5ef20a",
-    "x-agentid": "naQivTmsDa/cf4d0079-ed1b-4c55-a3f3-2ca1379727d1",
     "x-commit-tag": "72282a0d",
-    "x-device-id": "1921b001708100d7fa31002b9646bd0cc15a3e2e1f",
     "x-hy106": "",
-    "x-hy92": "e963067ffa31002b9646bd0c03000008b1951a",
-    "x-hy93": "1921b001708100d7fa31002b9646bd0cc15a3e2e1f",
-    "x-id": "b9575f6b0a8c4a55a08096904a5ef20a",
-    "x-instance-id": "5",
     "x-language": "zh-CN",
     "x-os_version": "Mac OS(10.15.7)-Blink",
     "x-platform": "mac",
@@ -145,7 +138,7 @@ def _generate_rid() -> str:
     return f"{timestamp_hex}-{random_hex}"
 
 
-def _parse_share_url_direct(share_url: str, cookie: str, timeout: int = 30) -> Optional[dict]:
+def _parse_share_url_direct(share_url: str, cookie: str, timeout: int = 30, diagnostics: Optional[dict] = None) -> Optional[dict]:
     """
     Call the Tencent Yuanbao API directly to parse a WeChat Channels share link.
 
@@ -179,14 +172,22 @@ def _parse_share_url_direct(share_url: str, cookie: str, timeout: int = 30) -> O
             if result.get("data") and result["data"].get("wx_export_id"):
                 return result["data"]
             else:
+                if diagnostics is not None:
+                    diagnostics.update({'step': 'share_link', 'reason': 'empty_parse_response'})
                 print(f"[wechat_channels_api] Yuanbao API unexpected response: {result}")
-                return None
+        return None
+    except urllib.error.HTTPError as exc:
+        if diagnostics is not None:
+            diagnostics.update({'step': 'share_link', 'http_status': int(exc.code), 'reason': 'http_error'})
+        print(f"[wechat_channels_api] _parse_share_url_direct error: HTTP {exc.code}")
+        return None
     except Exception as e:
+        if diagnostics is not None:
+            diagnostics.update({'step': 'share_link', 'reason': 'network_error'})
         print(f"[wechat_channels_api] _parse_share_url_direct error: {e}")
         return None
 
-
-def _get_feed_info_direct(export_id: str, general_token: str, timeout: int = 30) -> Optional[dict]:
+def _get_feed_info_direct(export_id: str, general_token: str, timeout: int = 30, diagnostics: Optional[dict] = None) -> Optional[dict]:
     """
     Call the WeChat Channels API directly to get video feed info.
 
@@ -234,14 +235,22 @@ def _get_feed_info_direct(export_id: str, general_token: str, timeout: int = 30)
             if result.get("errCode") == 0 and result.get("data"):
                 return result["data"]
             else:
+                if diagnostics is not None:
+                    diagnostics.update({'step': 'feed_info', 'reason': 'api_error'})
                 print(f"[wechat_channels_api] Channels API error: {result}")
                 return None
+    except urllib.error.HTTPError as exc:
+        if diagnostics is not None:
+            diagnostics.update({'step': 'feed_info', 'http_status': int(exc.code), 'reason': 'http_error'})
+        print(f"[wechat_channels_api] _get_feed_info_direct error: HTTP {exc.code}")
+        return None
     except Exception as e:
+        if diagnostics is not None:
+            diagnostics.update({'step': 'feed_info', 'reason': 'network_error'})
         print(f"[wechat_channels_api] _get_feed_info_direct error: {e}")
         return None
 
-
-def _fetch_video_profile_direct(share_url: str, cookie: str) -> Optional[dict]:
+def _fetch_video_profile_direct(share_url: str, cookie: str, diagnostics: Optional[dict] = None) -> Optional[dict]:
     """
     Full direct-mode pipeline: parse share URL → get feed info.
 
@@ -249,7 +258,7 @@ def _fetch_video_profile_direct(share_url: str, cookie: str) -> Optional[dict]:
     or None on failure.
     """
     # Step 1: Parse share URL via Yuanbao API
-    parse_data = _parse_share_url_direct(share_url, cookie)
+    parse_data = _parse_share_url_direct(share_url, cookie, diagnostics=diagnostics)
     if not parse_data:
         return None
 
@@ -275,7 +284,7 @@ def _fetch_video_profile_direct(share_url: str, cookie: str) -> Optional[dict]:
         return None
 
     # Step 3: Get feed info via WeChat Channels API
-    feed_data = _get_feed_info_direct(export_id, general_token)
+    feed_data = _get_feed_info_direct(export_id, general_token, diagnostics=diagnostics)
     if not feed_data:
         return None
 
@@ -355,6 +364,7 @@ def parse_share_link(
     share_url: str,
     yuanbao_cookie: Optional[str] = None,
     timeout: int = 30,
+    diagnostics: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Parse a WeChat Channels share link and return video metadata.
@@ -378,7 +388,7 @@ def parse_share_link(
     if cookie:
         # Direct mode — no third-party dependency. Do not fall back to a
         # public service after the user chose their own local authorization.
-        data = _fetch_video_profile_direct(share_url, cookie)
+        data = _fetch_video_profile_direct(share_url, cookie, diagnostics=diagnostics)
         if data:
             return data
         print("[wechat_channels_api] Local direct API mode failed.")
@@ -424,11 +434,16 @@ def download_video(
     os.makedirs(output_dir, exist_ok=True)
 
     # Step 1: Parse share link
-    data = parse_share_link(share_url, yuanbao_cookie)
+    parse_diagnostics: dict = {}
+    data = parse_share_link(share_url, yuanbao_cookie, diagnostics=parse_diagnostics)
     if not data:
         cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
         if cookie:
-            error = "本机视频号授权无法解析此链接。请确认授权仍有效后重试。"
+            status = parse_diagnostics.get('http_status')
+            if status in {401, 403, 412}:
+                error = f"[WECHAT_CHANNELS_AUTH_FAILED] 视频号授权被平台拒绝（HTTP {status}）。"
+            else:
+                error = "[WECHAT_CHANNELS_AUTH_PARSE_FAILED] 本机视频号授权无法解析此链接。"
         elif not is_worker_allowed():
             error = (
                 "Worker fallback is disabled. Configure "
@@ -443,6 +458,9 @@ def download_video(
             "output_dir": output_dir,
             "platform": "WeChat Channels",
             "url": share_url,
+            "download_method": "wechat_channels_direct" if cookie else "wechat_channels_worker",
+            "http_status": parse_diagnostics.get('http_status'),
+            "parse_diagnostics": parse_diagnostics,
         }
 
     feed_info = data.get("feedInfo", {})
@@ -577,11 +595,17 @@ def get_video_info(
     Returns:
         Dict with success status and metadata.
     """
-    data = parse_share_link(share_url, yuanbao_cookie)
+    parse_diagnostics: dict = {}
+    data = parse_share_link(share_url, yuanbao_cookie, diagnostics=parse_diagnostics)
     if not data:
         cookie = _resolve_yuanbao_cookie(yuanbao_cookie)
         if cookie:
-            error = "本机视频号授权无法解析此链接。请确认授权仍有效后重试。"
+            status = parse_diagnostics.get('http_status')
+            error = (
+                f"[WECHAT_CHANNELS_AUTH_FAILED] 视频号授权被平台拒绝（HTTP {status}）。"
+                if status in {401, 403, 412}
+                else "[WECHAT_CHANNELS_AUTH_PARSE_FAILED] 本机视频号授权无法解析此链接。"
+            )
         elif not is_worker_allowed():
             error = (
                 "Worker fallback is disabled. Configure "
@@ -593,6 +617,8 @@ def get_video_info(
         return {
             "success": False,
             "error": error,
+            "http_status": parse_diagnostics.get('http_status'),
+            "parse_diagnostics": parse_diagnostics,
         }
 
     feed_info = data.get("feedInfo", {})

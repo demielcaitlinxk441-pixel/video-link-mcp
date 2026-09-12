@@ -9,7 +9,6 @@
 - Replaced full-file compatibility decoding with fast start/end sampling and faster conversion settings.
 - Added resumable direct downloads, automatic network retries, and active queue cancellation.
 - Replaced fixed browser waits with early completion when media is detected.
-- Encrypted desktop AI API keys with Windows DPAPI and migrated older plaintext settings.
 - Fixed Douyin browser fallback stopping after the video-only stream before delayed audio arrived.
 - Recognized legacy `chenzhongtech.com` Kuaishou share links and routed them to the Kuaishou browser downloader.
 

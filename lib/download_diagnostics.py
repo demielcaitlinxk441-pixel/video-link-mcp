@@ -67,7 +67,16 @@ def classify_failure(error: object, *, default_stage: str = '链接解析') -> d
     reason = '下载没有完成。'
     action = '请复制诊断报告后重试；持续失败时根据失败阶段检查配置。'
 
-    if 'subtitle' in lower or '字幕' in raw:
+    if 'wechat_channels_auth_failed' in lower:
+        stage, code, reason = STAGES['auth'], 'WECHAT_CHANNELS_AUTH_FAILED', '视频号授权已失效或被平台拒绝。'
+        action = '点击“视频号授权”，完成本人元宝账号登录后重试。'
+    elif 'wechat_channels_auth_parse_failed' in lower:
+        stage, code, reason = STAGES['auth'], 'WECHAT_CHANNELS_AUTH_PARSE_FAILED', '视频号授权未能解析这条分享链接。'
+        action = '点击“视频号授权”重新登录后重试；若仍失败，请确认链接能在官方视频号中正常打开。'
+    elif 'wechat_channels_parse_failed' in lower:
+        stage, code, reason = STAGES['link'], 'WECHAT_CHANNELS_PARSE_FAILED', '视频号平台未返回这条链接的可下载信息。'
+        action = '确认分享链接完整且能在官方视频号打开，稍后重试。'
+    elif 'subtitle' in lower or '字幕' in raw:
         stage, code, reason = STAGES['subtitle'], 'SUBTITLE_FAILED', '字幕获取失败。'
         action = '视频仍可使用；稍后单独重试字幕。'
     elif 'audio' in lower or '音轨' in raw or '音频' in raw:

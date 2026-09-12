@@ -13,7 +13,6 @@ CREDENTIALS_FILE = APP_DIR / 'credentials.json'
 _YUANBAO_COOKIE = 'yuanbao_cookie'
 _BILIBILI_COOKIE = 'bilibili_cookie'
 _DOUYIN_COOKIE = 'douyin_cookie'
-_AI_API_KEY = 'ai_api_key'
 
 
 class _DataBlob(ctypes.Structure):
@@ -137,18 +136,3 @@ def save_douyin_cookie(cookie: str) -> None:
 def clear_douyin_cookie() -> None:
     """Remove only the locally saved Douyin authorization."""
     _clear_credential(_DOUYIN_COOKIE)
-
-
-def get_ai_api_key() -> str:
-    """Return the locally encrypted AI API key."""
-    return _get_credential(_AI_API_KEY)
-
-
-def save_ai_api_key(api_key: str) -> None:
-    """Encrypt the AI API key with Windows DPAPI."""
-    _save_credential(_AI_API_KEY, api_key)
-
-
-def clear_ai_api_key() -> None:
-    """Remove only the AI API key while preserving platform credentials."""
-    _clear_credential(_AI_API_KEY)

@@ -194,15 +194,10 @@ class DesktopAppTests(unittest.TestCase):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
 
-    def test_plaintext_ai_key_is_migrated_out_of_settings(self):
-        settings = {'ai': {'provider': 'OpenAI', 'api_key': 'secret-key'}}
-        with patch('desktop_app.save_ai_api_key') as save_key, \
-             patch('desktop_app._save_settings') as save_settings:
-            desktop_app._migrate_plaintext_ai_key(settings)
-
-        save_key.assert_called_once_with('secret-key')
-        self.assertNotIn('api_key', settings['ai'])
-        save_settings.assert_called_once_with(settings)
+    def test_first_screen_keeps_only_download_controls(self):
+        self.assertIsNone(self.window.findChild(QPushButton, 'aiConfigButton'))
+        self.assertIsNone(self.window.findChild(QPushButton, 'chatToggleButton'))
+        self.assertEqual(self.window.findChild(QLabel, 'destinationLabel').text(), '下载位置')
 
     def test_cancel_active_job_signals_worker(self):
         import threading
@@ -218,6 +213,26 @@ class DesktopAppTests(unittest.TestCase):
 
         self.assertTrue(self.window.cancel_events['active-1'].is_set())
         self.assertEqual(self.window.jobs['active-1']['stage'], '正在取消')
+
+    def test_failed_task_can_be_removed_without_deleting_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'saved.mp4'; video.write_bytes(b'video')
+            self.window.jobs['failed'] = {'id': 'failed', 'url': 'https://example.com/a', 'status': 'failed', 'video_path': str(video)}
+            self.window.job_order = ['failed']
+            self.window.cancel_job('failed')
+            self.assertEqual(self.window.jobs, {})
+            self.assertTrue(self.window.task_card.isHidden())
+            self.assertTrue(video.exists())
+
+    def test_retry_preserves_audio_only_mode_and_saved_media(self):
+        self.window.jobs['failed'] = {'id': 'failed', 'url': 'https://example.com/a', 'status': 'failed', 'mode': 'retry_audio', 'video_path': 'saved.mp4', 'output_dir': 'C:/downloads'}
+        self.window.job_order = ['failed']
+        with patch('desktop_app.threading.Thread') as worker:
+            self.window.retry_job('failed')
+        self.assertEqual(self.window.jobs['failed']['mode'], 'retry_audio')
+        self.assertEqual(self.window.jobs['failed']['video_path'], 'saved.mp4')
+        self.assertEqual(self.window.jobs['failed']['status'], 'active')
+        self.assertEqual(worker.call_count, 1)
 
     def test_right_click_action_deletes_the_selected_record_and_video_file(self):
         with tempfile.TemporaryDirectory() as directory:

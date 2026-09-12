@@ -39,8 +39,18 @@ class WorkerPrivacyTests(unittest.TestCase):
                     'https://weixin.qq.com/sph/example', yuanbao_cookie='owner-cookie'
                 )
         self.assertIsNone(result)
-        direct.assert_called_once_with('https://weixin.qq.com/sph/example', 'owner-cookie')
+        direct.assert_called_once_with(
+            'https://weixin.qq.com/sph/example', 'owner-cookie', diagnostics=None
+        )
         worker.assert_not_called()
+
+    def test_direct_authorization_failure_keeps_status_for_diagnostics(self):
+        with patch.object(api, '_fetch_video_profile_direct', return_value=None):
+            result = api.download_video(
+                'https://weixin.qq.com/sph/example', '.', yuanbao_cookie='owner-cookie'
+            )
+        self.assertEqual(result['download_method'], 'wechat_channels_direct')
+        self.assertIn('WECHAT_CHANNELS_AUTH_PARSE_FAILED', result['error'])
 
 
 if __name__ == '__main__':

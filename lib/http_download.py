@@ -1,6 +1,7 @@
 """Resumable HTTP downloads shared by direct and browser fallback paths."""
 
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -81,6 +82,10 @@ def download_with_resume(
 
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status == 206:
+                    match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+|\*)', response.headers.get('Content-Range', ''))
+                    if not match or int(match[1]) != existing or int(match[2]) < int(match[1]):
+                        raise OSError('断点续传位置不匹配，已保留原临时文件')
                 resumed = existing > 0 and response.status == 206
                 if not resumed:
                     existing = 0
@@ -106,7 +111,7 @@ def download_with_resume(
                                 'resumed': resumed,
                                 'temporary_file': part_path,
                             })
-                if total and downloaded < total:
+                if not downloaded or (total and downloaded != total):
                     raise OSError(
                         f'连接提前结束：已下载 {downloaded} 字节，应为 {total} 字节'
                     )

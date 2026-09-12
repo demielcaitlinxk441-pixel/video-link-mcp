@@ -11,6 +11,12 @@ class DownloadDiagnosticsTests(unittest.TestCase):
         self.assertEqual(classify_failure('HTTP Error 429')['error_code'], 'RATE_LIMITED')
         self.assertEqual(classify_failure('HTTP Error 412')['failed_stage'], '授权')
 
+    def test_wechat_authorization_parse_failure_has_a_specific_recovery_action(self):
+        failure = classify_failure('[WECHAT_CHANNELS_AUTH_PARSE_FAILED] 本机视频号授权无法解析此链接。')
+        self.assertEqual(failure['error_code'], 'WECHAT_CHANNELS_AUTH_PARSE_FAILED')
+        self.assertEqual(failure['failed_stage'], '授权')
+        self.assertIn('视频号授权', failure['suggested_action'])
+
     def test_local_secrets_and_signed_parameters_are_redacted(self):
         report = diagnostic_report({
             'success': False,

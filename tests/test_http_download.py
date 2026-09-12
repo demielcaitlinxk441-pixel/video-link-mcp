@@ -22,6 +22,24 @@ class Response(io.BytesIO):
 
 
 class HttpDownloadTests(unittest.TestCase):
+    def test_wrong_resume_offset_does_not_corrupt_saved_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'video.mp4'
+            partial = Path(f'{target}.part'); partial.write_bytes(b'hello')
+            with patch('lib.http_download.urllib.request.urlopen', return_value=Response(
+                b'wrong', status=206, headers={'Content-Range': 'bytes 0-4/10'}
+            )), self.assertRaises(OSError):
+                download_with_resume('https://example.com/video', str(target), max_attempts=1)
+            self.assertEqual(partial.read_bytes(), b'hello')
+            self.assertFalse(target.exists())
+
+    def test_empty_response_is_not_published_as_finished_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'video.mp4'
+            with patch('lib.http_download.urllib.request.urlopen', return_value=Response(b'')), self.assertRaises(OSError):
+                download_with_resume('https://example.com/video', str(target), max_attempts=1)
+            self.assertFalse(target.exists())
+
     def test_network_failure_retries_and_finishes_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'video.mp4'
